@@ -205,12 +205,14 @@ class App:
 
         self.camera_var.set(self.initial_cam_name)
         # Add command to OptionMenu to handle camera changes
-        self.camera_dropdown = tk.OptionMenu(camera_select_frame, self.camera_var, *camera_names, command=self._on_camera_select)
-        self.camera_dropdown.pack(pady=5, padx=5, fill="x")
-        self.camera_dropdown.config(state=cam_dropdown_state)
-        logger.debug(f"tk.OptionMenu created: default='{self.initial_cam_name}', options='{camera_names}', state='{cam_dropdown_state}'")
+        try:
+            # self.camera_var.set(self.initial_cam_name) # Already set above the try block
+            self.camera_dropdown = tk.OptionMenu(camera_select_frame, self.camera_var, *camera_names, command=self._on_camera_select)
+            self.camera_dropdown.pack(pady=5, padx=5, fill="x")
+            self.camera_dropdown.config(state=cam_dropdown_state) # cam_dropdown_state is tk.NORMAL or tk.DISABLED
+            logger.debug(f"tk.OptionMenu created: default='{self.initial_cam_name}', options='{camera_names}', state='{self.camera_dropdown['state']}'") # Log actual state
         except Exception as e:
-            logger.critical(f"Exception during tk.OptionMenu creation: {e}", exc_info=args.debug)
+            logger.critical(f"Exception during tk.OptionMenu creation: {e}", exc_info=args.debug) # Log with exc_info for debug
             self.camera_dropdown = ttk.Label(camera_select_frame, text="tk.OptionMenu failed.")
             self.camera_dropdown.pack(pady=5, padx=5, fill="x")
 
