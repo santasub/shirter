@@ -10,8 +10,18 @@ class App:
         self.root.title("DJ Shirt Visualizer")
 
         self.cap = None
-        self.is_processing = False
         self.logo_image_original = None # Initialize attribute
+
+        # --- Tracking variables ---
+        self.tracker = None
+        self.tracker_initialized = False
+        self.last_known_bbox = None # Stores (x,y,w,h) of the last known good position
+        self.current_bbox_for_warp = None # Bbox to use for current frame's warp
+
+        # --- Video Loop & Processing Flags ---
+        self.camera_active = False  # Flag to control the unified video loop
+        self.after_id_video_loop = None  # To store ID of root.after() call
+        self.is_processing = False # Main flag to enable/disable shirt processing logic
 
         # HSV Color range defaults (e.g., for a shade of green)
         # User will be able to adjust this.
@@ -28,35 +38,26 @@ class App:
         # self.video_frame.pack(fill=tk.BOTH, expand=True) # pack/grid is handled by add
         self.main_paned_window.add(self.video_frame, stretch="always", minsize=300) # stretch="always"
 
-        # --- Control Frame (Right Pane) - This will now contain the canvas and scrollbar ---
-        self.outer_control_frame = ttk.Frame(self.main_paned_window, padding="0") # Padding will be on inner frame
-        self.main_paned_window.add(self.outer_control_frame, stretch="never", minsize=280)
+        # --- Control Frame (Right Pane) ---
+        # This is the main container for controls, will be added to the PanedWindow
+        self.control_panel_outer_frame = ttk.Frame(self.main_paned_window, padding="5")
+        self.main_paned_window.add(self.control_panel_outer_frame, stretch="never", minsize=300) # Increased minsize a bit
 
-        # Create a Canvas widget for scrolling
-        self.control_canvas = tk.Canvas(self.outer_control_frame)
-        self.control_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Configure grid for the control_panel_outer_frame to hold Notebook and Start/Stop button
+        self.control_panel_outer_frame.grid_rowconfigure(0, weight=1) # Notebook will expand
+        self.control_panel_outer_frame.grid_rowconfigure(1, weight=0) # Button fixed at bottom
+        self.control_panel_outer_frame.grid_columnconfigure(0, weight=1)
 
-        # Add a Scrollbar to the Canvas
-        self.scrollbar = ttk.Scrollbar(self.outer_control_frame, orient=tk.VERTICAL, command=self.control_canvas.yview)
-        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.control_canvas.configure(yscrollcommand=self.scrollbar.set)
+        # Create the Notebook (Tabs)
+        self.notebook = ttk.Notebook(self.control_panel_outer_frame)
+        self.notebook.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
 
-        # Create a frame inside the canvas that will hold all the controls
-        # This is the frame that will be scrolled.
-        self.control_frame = ttk.Frame(self.control_canvas, padding="5") # Actual frame for controls
-        self.control_canvas_window = self.control_canvas.create_window((0, 0), window=self.control_frame, anchor="nw")
+        # Create frames for each tab
+        self.tab_camera_color = ttk.Frame(self.notebook, padding="5")
+        self.tab_overlays = ttk.Frame(self.notebook, padding="5")
 
-        # Bind the canvas to update scrollregion when the inner frame's size changes
-        self.control_frame.bind("<Configure>", lambda e: self.control_canvas.configure(scrollregion=self.control_canvas.bbox("all")))
-        # Bind mousewheel scrolling (platform-dependent)
-        self._bind_mousewheel(self.control_canvas)
-        self._bind_mousewheel(self.outer_control_frame) # Also bind to outer frame
-        self._bind_mousewheel(self.control_frame) # And inner frame, just in case
-
-
-        # self.root.grid_rowconfigure(0, weight=1) # Not needed with PanedWindow filling root
-        # self.root.grid_columnconfigure(0, weight=3)
-        # self.root.grid_columnconfigure(1, weight=1)
+        self.notebook.add(self.tab_camera_color, text='Camera & Color')
+        self.notebook.add(self.tab_overlays, text='Overlays')
 
         # --- Video Display Area (within self.video_frame) ---
         # Set a default size for video labels to prevent collapsing
@@ -78,103 +79,163 @@ class App:
         self.raw_video_label.bind("<Configure>", self._on_raw_video_resize)
         self.processed_video_label.bind("<Configure>", self._on_processed_video_resize)
 
+        # --- Populate Tabs ---
+        self._populate_camera_color_tab(self.tab_camera_color)
+        self._populate_overlays_tab(self.tab_overlays)
 
-        # --- Control Panel Area (within self.control_frame) ---
-        # Ensure control_frame itself can resize its content if window is very tall
-        self.control_frame.grid_rowconfigure(0, weight=0) # Camera setup at top
-        self.control_frame.grid_rowconfigure(1, weight=0) # Color frame
-        self.control_frame.grid_rowconfigure(2, weight=0) # Text overlay
-        self.control_frame.grid_rowconfigure(3, weight=0) # Logo overlay
-        self.control_frame.grid_rowconfigure(4, weight=0) # ROI Frame
-        self.control_frame.grid_rowconfigure(5, weight=1) # Spacer or empty row to push button to bottom
-        self.control_frame.grid_rowconfigure(6, weight=0) # Button at bottom
-        self.control_frame.grid_columnconfigure(0, weight=1)
+        # Start/Stop Button (Now part of control_panel_outer_frame, below the notebook)
+        self.start_stop_button = ttk.Button(self.control_panel_outer_frame, text="Start Processing", command=self.toggle_processing)
+        self.start_stop_button.grid(row=1, column=0, sticky="ew", padx=5, pady=10)
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.camera_active = False  # Flag to control the unified video loop
+        self.after_id_video_loop = None  # To store ID of root.after() call
+        self.is_processing = False # Ensure this is initialized before _initial_camera_start might use it implicitly
+
+        # Attempt to start initial camera preview
+        self._initial_camera_start()
 
 
+    # Removed _bind_mousewheel as the canvas and scrollbar are removed.
+    # If Notebook content overflows a tab, Tkinter handles it or we might need per-tab scrollable frames later.
+
+    def _initial_camera_start(self):
+        if self.available_cameras and self.initial_cam_name != "No cameras found":
+            print(f"DEBUG: Attempting initial camera start with: {self.initial_cam_name}")
+            self._start_camera_feed(camera_name=self.initial_cam_name)
+        else:
+            print("DEBUG: No cameras available for initial preview or 'No cameras found' selected.")
+            # Ensure UI reflects that no camera is active
+            self.raw_video_label.configure(image=self.default_video_img)
+            self.raw_video_label.image = self.default_video_img
+            self.processed_video_label.configure(image=self.default_video_img)
+            self.processed_video_label.image = self.default_video_img
+            self.camera_dropdown.config(state=tk.DISABLED)
+
+
+    def _start_camera_feed(self, camera_name=None):
+        if self.after_id_video_loop:
+            self.root.after_cancel(self.after_id_video_loop)
+            self.after_id_video_loop = None
+
+        if self.cap and self.cap.isOpened():
+            try:
+                self.cap.release()
+                print("DEBUG: Previous camera released in _start_camera_feed.")
+            except Exception as e:
+                print(f"DEBUG: Exception releasing previous camera in _start_camera_feed: {e}")
+        self.cap = None
+        self.camera_active = False
+
+        if camera_name is None: # If called from toggle_processing without a specific camera
+            camera_name = self.camera_var.get()
+
+        if not camera_name or camera_name == "No cameras found":
+            messagebox.showerror("Error", "No camera selected or available.")
+            self.raw_video_label.configure(image=self.default_video_img) # Reset preview
+            self.raw_video_label.image = self.default_video_img
+            self.processed_video_label.configure(image=self.default_video_img)
+            self.processed_video_label.image = self.default_video_img
+            self.camera_dropdown.config(state=tk.DISABLED if not self.available_cameras else tk.NORMAL)
+            self.start_stop_button.config(text="Start Processing")
+            self.is_processing = False # Ensure processing is marked as off
+            return False # Indicate failure
+
+        cam_idx = self.available_cameras.get(camera_name, -1)
+        if cam_idx == -1:
+            messagebox.showerror("Error", f"Invalid camera selected: {camera_name}")
+            return False
+
+        backend = cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_AVFOUNDATION if sys.platform == 'darwin' else cv2.CAP_ANY
+        self.cap = cv2.VideoCapture(cam_idx, backend)
+
+        if not self.cap.isOpened():
+            error_message = f"Could not open {camera_name} (Index {cam_idx})."
+            if sys.platform == 'darwin':
+                error_message += "\nPlease ensure app has camera permission (System Settings > Privacy & Security > Camera)."
+            messagebox.showerror("Error", error_message)
+            self.cap = None
+            self.camera_active = False
+            self.raw_video_label.configure(image=self.default_video_img) # Reset preview
+            self.raw_video_label.image = self.default_video_img
+            return False
+
+        print(f"DEBUG: Camera {camera_name} (Index {cam_idx}) opened successfully.")
+        self.camera_active = True
+        self.camera_dropdown.config(state=tk.DISABLED if self.is_processing else tk.NORMAL) # Disable during processing
+        self._update_video_feeds_loop() # Start the unified loop
+        return True
+
+
+    def _on_camera_select(self, selected_camera_name):
+        """Called when a new camera is selected from the OptionMenu."""
+        print(f"DEBUG: Camera selected via OptionMenu: {selected_camera_name}")
+        if not self.is_processing: # Only switch preview if not actively processing
+            self._start_camera_feed(camera_name=selected_camera_name)
+        else:
+            # If processing, user needs to stop and restart to change camera.
+            # Or, we could allow dynamic switching, but that's more complex.
+            print("INFO: To change camera, please stop processing first.")
+            # Revert OptionMenu to the currently active camera if different
+            # This requires knowing which camera self.cap is using. For now, just inform.
+            # self.camera_var.set(current_active_camera_name) # TODO if needed
+
+
+    def _populate_camera_color_tab(self, tab_frame):
         # Camera Selection
-        camera_select_frame = ttk.LabelFrame(self.control_frame, text="Camera Setup")
-        # camera_select_frame.pack(fill="x", expand=False, padx=5, pady=5)
-        camera_select_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+        camera_select_frame = ttk.LabelFrame(tab_frame, text="Camera Setup")
+        camera_select_frame.pack(fill="x", expand=False, padx=5, pady=5)
 
         self.camera_var = tk.StringVar()
-        # Call _list_available_cameras to keep that part of the startup sequence for logging,
-        # but its results won't be used for the OptionMenu in this test.
         self.available_cameras = self._list_available_cameras()
         print(f"DEBUG: self.available_cameras after call: {self.available_cameras}")
 
-
-        # --- Simplified OptionMenu Test (or chosen camera selection widget) ---
-        # Reverting to the dynamic list population for now, assuming the PanedWindow might interact differently
-        # or that we still need to test this part. If it crashes, we'll know the PanedWindow didn't solve it.
-        print("DEBUG: Attempting to create OptionMenu with dynamic values.")
         camera_names = list(self.available_cameras.keys())
-        initial_cam_name = "No cameras found" # Default if nothing found or list is empty
-        cam_dropdown_state = "disabled"
+        self.initial_cam_name = "No cameras found" # Made instance variable for _initial_camera_start
+        cam_dropdown_state = tk.DISABLED
 
-        if camera_names: # If actual cameras were found
-            initial_cam_name = camera_names[0]
-            cam_dropdown_state = "readonly"
-        else: # No actual cameras found, ensure 'No cameras found' is in the list for display
-            camera_names = [initial_cam_name]
-            if initial_cam_name not in self.available_cameras:
-                 self.available_cameras[initial_cam_name] = -1
+        if camera_names:
+            self.initial_cam_name = camera_names[0]
+            cam_dropdown_state = tk.NORMAL
+        else:
+            camera_names = [self.initial_cam_name]
+            if self.initial_cam_name not in self.available_cameras: # Should be caught by _list_available_cameras
+                 self.available_cameras[self.initial_cam_name] = -1 # Ensure it exists if no cams found
 
-        try:
-            self.camera_var.set(initial_cam_name)
-            # Using tk.OptionMenu instead of ttk.OptionMenu
-            self.camera_dropdown = tk.OptionMenu(camera_select_frame, self.camera_var,
-                                                 *camera_names) # initial_cam_name is set via camera_var
-            self.camera_dropdown.pack(pady=5, padx=5, fill="x")
-
-            # State handling for tk.OptionMenu (disable/enable directly)
-            if cam_dropdown_state == "disabled":
-                self.camera_dropdown.config(state=tk.DISABLED)
-            else: # "readonly" for ttk is effectively "normal" for tk if var is controlled
-                self.camera_dropdown.config(state=tk.NORMAL)
-
-            print(f"DEBUG: Successfully created tk.OptionMenu with dynamic values: default='{initial_cam_name}', options='{camera_names}'")
-        except Exception as e:
-            print(f"DEBUG: CRITICAL - Exception during tk.OptionMenu creation: {e}")
-            # Fallback to Label
-            self.camera_dropdown = ttk.Label(camera_select_frame, text="tk.OptionMenu failed.") # Using ttk.Label for consistency if it's just a fallback
-            self.camera_dropdown.pack(pady=5, padx=5, fill="x")
-        # --- End Camera Selection Widget ---
-
+        self.camera_var.set(self.initial_cam_name)
+        # Add command to OptionMenu to handle camera changes
+        self.camera_dropdown = tk.OptionMenu(camera_select_frame, self.camera_var, *camera_names, command=self._on_camera_select)
+        self.camera_dropdown.pack(pady=5, padx=5, fill="x")
+        self.camera_dropdown.config(state=cam_dropdown_state)
+        # print is now part of _list_available_cameras or _start_camera_feed
 
         # Color Selection (HSV)
-        self.color_frame = ttk.LabelFrame(self.control_frame, text="Shirt Color (HSV)")
-        # self.color_frame.pack(fill="x", expand=False, padx=5, pady=5)
-        self.color_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=5)
+        color_frame = ttk.LabelFrame(tab_frame, text="Shirt Color (HSV)")
+        color_frame.pack(fill="x", expand=False, padx=5, pady=5)
 
-
-        self.pick_color_button = ttk.Button(self.color_frame, text="Pick Shirt Color (from Preview)", command=self.enable_color_picker_mode)
-        self.pick_color_button.pack(pady=2) # .pack within its LabelFrame is fine
+        self.pick_color_button = ttk.Button(color_frame, text="Pick Shirt Color (from Preview)", command=self.enable_color_picker_mode)
+        self.pick_color_button.pack(pady=2)
         self.color_picker_mode = False
 
-        # Display for the chosen color
-        self.hsv_color_display_label = ttk.Label(self.color_frame, text="Selected Color:")
+        self.hsv_color_display_label = ttk.Label(color_frame, text="Selected Color:")
         self.hsv_color_display_label.pack(pady=2)
-        self.hsv_color_swatch = tk.Label(self.color_frame, background="grey", width=10, height=2)
+        self.hsv_color_swatch = tk.Label(color_frame, background="grey", width=10, height=2)
         self.hsv_color_swatch.pack(pady=2)
         self._update_color_swatch(self.lower_hsv, self.upper_hsv)
 
-        # --- New Tolerance/Range Sliders ---
-        ttk.Label(self.color_frame, text="Picked Color Tolerances:").pack(pady=(5,0))
-
-        # Hue Tolerance
-        self.hue_tolerance_var = tk.IntVar(value=10) # Default H tolerance
-        self.base_h_picked = -1 # Will store the H value from click
-        hue_tolerance_slider_frame = ttk.Frame(self.color_frame)
+        ttk.Label(color_frame, text="Picked Color Tolerances:").pack(pady=(5,0))
+        self.hue_tolerance_var = tk.IntVar(value=10)
+        self.base_h_picked = -1
+        hue_tolerance_slider_frame = ttk.Frame(color_frame)
         hue_tolerance_slider_frame.pack(fill="x", expand=True)
         ttk.Label(hue_tolerance_slider_frame, text="H Tol:").pack(side=tk.LEFT, padx=2)
         self.hue_tolerance_slider = tk.Scale(hue_tolerance_slider_frame, from_=0, to=30, orient=tk.HORIZONTAL, variable=self.hue_tolerance_var, command=self._update_hsv_from_tolerance_sliders, length=150)
         self.hue_tolerance_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
 
-        # Saturation Range
         self.s_min_var = tk.IntVar(value=50)
         self.s_max_var = tk.IntVar(value=255)
         self.base_s_picked = -1
-        s_range_frame = ttk.Frame(self.color_frame)
+        s_range_frame = ttk.Frame(color_frame)
         s_range_frame.pack(fill="x", expand=True, pady=2)
         ttk.Label(s_range_frame, text="S Min:").pack(side=tk.LEFT, padx=2)
         self.s_min_slider = tk.Scale(s_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.s_min_var, command=self._update_hsv_from_tolerance_sliders, length=150)
@@ -183,11 +244,10 @@ class App:
         self.s_max_slider = tk.Scale(s_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.s_max_var, command=self._update_hsv_from_tolerance_sliders, length=150)
         self.s_max_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
 
-        # Value Range
         self.v_min_var = tk.IntVar(value=50)
         self.v_max_var = tk.IntVar(value=255)
         self.base_v_picked = -1
-        v_range_frame = ttk.Frame(self.color_frame)
+        v_range_frame = ttk.Frame(color_frame)
         v_range_frame.pack(fill="x", expand=True, pady=2)
         ttk.Label(v_range_frame, text="V Min:").pack(side=tk.LEFT, padx=2)
         self.v_min_slider = tk.Scale(v_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.v_min_var, command=self._update_hsv_from_tolerance_sliders, length=150)
@@ -196,71 +256,42 @@ class App:
         self.v_max_slider = tk.Scale(v_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.v_max_var, command=self._update_hsv_from_tolerance_sliders, length=150)
         self.v_max_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
 
-        # --- Main 6 HSV Sliders (now display the calculated range) ---
-        ttk.Label(self.color_frame, text="Resulting HSV Range:").pack(pady=(5,0))
-        hsv_sliders_frame = ttk.Frame(self.color_frame) # Frame to hold sliders for better packing
+        ttk.Label(color_frame, text="Resulting HSV Range:").pack(pady=(5,0))
+        hsv_sliders_frame = ttk.Frame(color_frame)
         hsv_sliders_frame.pack(fill="x", expand=True)
-        self.hsv_sliders = {} # These will display the final range
+        self.hsv_sliders = {}
         for i, label in enumerate(["H_low", "S_low", "V_low", "H_high", "S_high", "V_high"]):
             val = self.lower_hsv[i % 3] if "low" in label else self.upper_hsv[i % 3]
             max_val = 179 if "H_" in label else 255
-            # These main sliders are now for display, or direct override. Their command is _update_hsv_from_main_sliders
             scale = tk.Scale(hsv_sliders_frame, from_=0, to=max_val, orient=tk.HORIZONTAL, label=label, length=200, command=self._update_hsv_from_main_sliders)
             scale.set(val)
-            scale.pack(fill="x", padx=2) # pack into hsv_sliders_frame
+            scale.pack(fill="x", padx=2)
             self.hsv_sliders[label] = scale
 
-        # Initialize base picked colors to something neutral if not picked yet
         if self.base_h_picked == -1: self.base_h_picked = (self.lower_hsv[0] + self.upper_hsv[0]) // 2
         if self.base_s_picked == -1: self.base_s_picked = 128
         if self.base_v_picked == -1: self.base_v_picked = 128
-        self._update_hsv_from_tolerance_sliders() # Initial calculation
+        self._update_hsv_from_tolerance_sliders()
 
+    def _populate_overlays_tab(self, tab_frame):
         # Text Overlay
-        text_overlay_frame = ttk.LabelFrame(self.control_frame, text="Text Overlay")
-        # text_overlay_frame.pack(fill="x", expand=False, padx=5, pady=5)
-        text_overlay_frame.grid(row=2, column=0, sticky="ew", padx=5, pady=5)
-
+        text_overlay_frame = ttk.LabelFrame(tab_frame, text="Text Overlay")
+        text_overlay_frame.pack(fill="x", expand=False, padx=5, pady=5)
         self.text_entry_var = tk.StringVar(value="DJ SHIRT")
         self.text_entry = ttk.Entry(text_overlay_frame, textvariable=self.text_entry_var)
-        self.text_entry.pack(pady=5, padx=5, fill="x") # .pack within its LabelFrame is fine
+        self.text_entry.pack(pady=5, padx=5, fill="x")
 
         # Logo Overlay
-        logo_overlay_frame = ttk.LabelFrame(self.control_frame, text="Logo Overlay")
-        # logo_overlay_frame.pack(fill="x", expand=False, padx=5, pady=5)
-        logo_overlay_frame.grid(row=3, column=0, sticky="ew", padx=5, pady=5)
-
-        ttk.Button(logo_overlay_frame, text="Upload Logo", command=self.upload_logo).pack(pady=2) # .pack
+        logo_overlay_frame = ttk.LabelFrame(tab_frame, text="Logo Overlay")
+        logo_overlay_frame.pack(fill="x", expand=False, padx=5, pady=5)
+        ttk.Button(logo_overlay_frame, text="Upload Logo", command=self.upload_logo).pack(pady=2)
         self.logo_path_var = tk.StringVar(value="No logo selected.")
-        ttk.Label(logo_overlay_frame, textvariable=self.logo_path_var, wraplength=180).pack(pady=2, padx=5, fill="x") # .pack
+        ttk.Label(logo_overlay_frame, textvariable=self.logo_path_var, wraplength=180).pack(pady=2, padx=5, fill="x")
 
         # ROI Definition (Placeholder)
-        roi_frame = ttk.LabelFrame(self.control_frame, text="Overlay Regions (ROI)")
-        # roi_frame.pack(fill="x", expand=False, padx=5, pady=5)
-        roi_frame.grid(row=4, column=0, sticky="ew", padx=5, pady=5)
-        ttk.Button(roi_frame, text="Define Shirt Regions", command=self.define_roi, state=tk.DISABLED).pack(pady=5) # .pack
-
-        # Spacer Frame to push button to bottom
-        spacer_frame = ttk.Frame(self.control_frame) # No padding, just to take up space
-        spacer_frame.grid(row=5, column=0, sticky="nsew")
-        # self.control_frame.grid_rowconfigure(5, weight=1) # Already done above
-
-        # Start/Stop Button
-        self.start_stop_button = ttk.Button(self.control_frame, text="Start Processing", command=self.toggle_processing)
-        # self.start_stop_button.pack(pady=10, padx=5, fill="x", side=tk.BOTTOM)
-        self.start_stop_button.grid(row=6, column=0, sticky="ew", padx=5, pady=10)
-
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing) # Handle window close
-
-    def _bind_mousewheel(self, widget):
-        # Platform-specific mousewheel binding
-        # For Linux, events are Button-4 and Button-5
-        # For Windows and macOS, event is <MouseWheel>
-        if sys.platform == "linux":
-            widget.bind_all("<Button-4>", lambda e: self.control_canvas.yview_scroll(-1, "units"), add="+")
-            widget.bind_all("<Button-5>", lambda e: self.control_canvas.yview_scroll(1, "units"), add="+")
-        else: # Windows, macOS
-            widget.bind_all("<MouseWheel>", lambda e: self.control_canvas.yview_scroll(int(-1*(e.delta/120)), "units"), add="+")
+        roi_frame = ttk.LabelFrame(tab_frame, text="Overlay Regions (ROI)")
+        roi_frame.pack(fill="x", expand=False, padx=5, pady=5)
+        ttk.Button(roi_frame, text="Define Shirt Regions", command=self.define_roi, state=tk.DISABLED).pack(pady=5)
 
 
     def _on_raw_video_resize(self, event):
@@ -524,187 +555,208 @@ class App:
         self.is_processing = not self.is_processing
         if self.is_processing:
             cam_idx_str = self.camera_var.get()
-            if not cam_idx_str or "No cameras found" in cam_idx_str :
-                messagebox.showerror("Error", "No camera selected or available.")
-                self.is_processing = False
-                return
+            if not self.camera_active: # If camera isn't already running (e.g. from initial preview)
+                if not self._start_camera_feed(): # Try to start it with current selection
+                    self.is_processing = False # Ensure processing flag is off if camera failed
+                    return # _start_camera_feed shows messages
 
-            cam_idx = self.available_cameras[cam_idx_str]
-            if cam_idx == -1:
-                messagebox.showerror("Error", "Invalid camera selected. Please ensure 'No cameras found' is not selected if cameras are available.")
-                self.is_processing = False
-                return
-
-            backend = cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_AVFOUNDATION if sys.platform == 'darwin' else cv2.CAP_ANY
-            self.cap = cv2.VideoCapture(cam_idx, backend)
-
-            if not self.cap.isOpened():
-                error_message = f"Could not open camera {cam_idx}."
-                if sys.platform == 'darwin':
-                    error_message += "\nPlease ensure the application has permission to access the camera. Check System Settings > Privacy & Security > Camera."
-                messagebox.showerror("Error", error_message)
-                self.is_processing = False
-                self.cap = None
-                return
-
+            # If camera is active (either from preview or just started)
+            self.is_processing = True
             self.start_stop_button.config(text="Stop Processing")
-            self.camera_dropdown.config(state="disabled") # Disable camera selection while processing
-            self.pick_color_button.config(state="normal") # Enable color picking
+            self.camera_dropdown.config(state=tk.DISABLED) # Disable camera selection while processing
+            self.pick_color_button.config(state=tk.NORMAL)
             print("Processing Started")
-            self._video_loop()
-        else:
+            # The _update_video_feeds_loop is already running if camera_active is true,
+            # it will pick up the is_processing flag.
+        else: # Stopping processing
+            self.is_processing = False
             self.start_stop_button.config(text="Start Processing")
-            self.camera_dropdown.config(state="readonly" if self.available_cameras and next(iter(self.available_cameras)) != "No cameras found" else "disabled")
+            self.camera_dropdown.config(state=tk.NORMAL if self.available_cameras and self.initial_cam_name != "No cameras found" else tk.DISABLED)
             self.pick_color_button.config(state="disabled")
-            if self.color_picker_mode: # If color picking was active, disable it
+
+            if self.color_picker_mode:
                 self.color_picker_mode = False
                 self.raw_video_label.unbind("<Button-1>")
-
             print("Processing Stopped")
-            if self.cap:
-                try:
-                    if self.cap.isOpened(): # Only release if it was actually opened
-                        self.cap.release()
-                        print("DEBUG: Camera released in toggle_processing.")
-                except Exception as e:
-                    print(f"DEBUG: Exception during camera release in toggle_processing: {e}")
-                finally:
-                    self.cap = None
-            # Reset video labels to default image when stopping
-            self.raw_video_label.configure(image=self.default_video_img)
-            self.raw_video_label.image = self.default_video_img # Keep a reference
+
+            # Reset processed video label to default, raw preview continues via _update_video_feeds_loop
             self.processed_video_label.configure(image=self.default_video_img)
-            self.processed_video_label.image = self.default_video_img # Keep a reference
+            self.processed_video_label.image = self.default_video_img
 
 
-    def _video_loop(self):
-        if not self.is_processing or not self.cap:
+    def _update_video_feeds_loop(self): # Renamed from _video_loop
+        if not self.camera_active or not self.cap or not self.cap.isOpened():
+            # If camera becomes inactive unexpectedly, stop the loop and reset UI
+            print("DEBUG: Camera feed loop stopping as camera is not active or not opened.")
+            self.camera_active = False
+            self.is_processing = False # Also stop processing
+            self.raw_video_label.configure(image=self.default_video_img)
+            self.raw_video_label.image = self.default_video_img
+            self.processed_video_label.configure(image=self.default_video_img)
+            self.processed_video_label.image = self.default_video_img
+            self.start_stop_button.config(text="Start Processing")
+            is_cam_available = bool(self.available_cameras and self.initial_cam_name != "No cameras found")
+            self.camera_dropdown.config(state=tk.NORMAL if is_cam_available else tk.DISABLED)
             return
 
         ret, frame = self.cap.read()
         if not ret:
             print("Error: Can't receive frame (stream end?).")
-            self.root.after(100, self._video_loop) # Try again shortly
+            self.after_id_video_loop = self.root.after(100, self._update_video_feeds_loop) # Try again shortly
             return
 
-        # Store a copy for the color picker, before any overlays are drawn on `frame`
-        self.current_raw_frame_for_picker = frame.copy()
+        # Always display raw frame
+        self.current_raw_frame_for_picker = frame.copy() # For color picker
 
-        # --- Start Processing Logic (from main.py) ---
-        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        target_raw_w = self.raw_video_label_width - 10 if self.raw_video_label_width > 20 else self.raw_video_label_width
+        target_raw_h = self.raw_video_label_height - 10 if self.raw_video_label_height > 20 else self.raw_video_label_height
+        resized_raw_frame = self._resize_frame_keep_aspect_ratio(frame, target_raw_w, target_raw_h)
+        img_raw = cv2.cvtColor(resized_raw_frame, cv2.COLOR_BGR2RGB)
+        img_raw = Image.fromarray(img_raw)
+        imgtk_raw = ImageTk.PhotoImage(image=img_raw)
+        self.raw_video_label.imgtk = imgtk_raw
+        self.raw_video_label.configure(image=imgtk_raw)
 
-        # Use current HSV range from sliders/picker
-        current_lower_hsv = self.lower_hsv
-        current_upper_hsv = self.upper_hsv
+        if self.is_processing:
+            # --- Start Processing Logic ---
+            processed_frame_display = frame.copy() # Start with a fresh copy of the original frame for processing
 
-        mask = cv2.inRange(hsv_frame, current_lower_hsv, current_upper_hsv)
+            hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            current_lower_hsv = self.lower_hsv
+            current_upper_hsv = self.upper_hsv
+            mask = cv2.inRange(hsv_frame, current_lower_hsv, current_upper_hsv)
 
-        # Optional: Morphological operations (can be added as a GUI option later)
-        # kernel = np.ones((5,5), np.uint8)
-        # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            self.current_bbox_for_warp = None # Reset for current frame
 
-        processed_frame_display = frame.copy() # Frame to draw bounding boxes, text etc. on
+            if self.tracker_initialized:
+                success, bbox = self.tracker.update(frame)
+                if success:
+                    self.last_known_bbox = bbox
+                    self.current_bbox_for_warp = bbox
+                    # (x, y, w, h) = [int(v) for v in bbox]
+                    # cv2.rectangle(processed_frame_display, (x, y), (x + w, y + h), (255, 0, 0), 2) # Blue for tracker
+                else:
+                    print("Tracker lost object.")
+                    self.tracker_initialized = False
+                    self.tracker = None # Destroy tracker
+                    # Will attempt re-detection via color below
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            largest_contour = max(contours, key=cv2.contourArea)
-            min_contour_area = 500 # TODO: Make this configurable in GUI
-            if cv2.contourArea(largest_contour) > min_contour_area:
-                # --- Start Perspective Warp ---
-                # 1. Get an approximate quadrilateral for the contour
-                peri = cv2.arcLength(largest_contour, True)
-                approx_quad = cv2.approxPolyDP(largest_contour, 0.02 * peri, True) # Adjust epsilon as needed
+            if not self.tracker_initialized:
+                # Optional: Morphological operations
+                # kernel = np.ones((5,5), np.uint8)
+                # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+                # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+                contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    largest_contour = max(contours, key=cv2.contourArea)
+                    min_contour_area = 500 # TODO: Make configurable
+                    if cv2.contourArea(largest_contour) > min_contour_area:
+                        x, y, w, h = cv2.boundingRect(largest_contour)
+                        self.current_bbox_for_warp = (x,y,w,h)
+                        self.last_known_bbox = (x,y,w,h)
 
-                # Draw the approximated contour
-                # cv2.drawContours(processed_frame_display, [approx_quad], -1, (255, 0, 0), 3)
+                        # Initialize tracker
+                        try:
+                            # self.tracker = cv2.TrackerKCF_create() # Faster, less accurate
+                            self.tracker = cv2.TrackerCSRT_create() # Slower, more accurate
+                            self.tracker.init(frame, self.last_known_bbox)
+                            self.tracker_initialized = True
+                            print(f"Tracker initialized with bbox: {self.last_known_bbox}")
+                        except Exception as e:
+                            print(f"Error initializing tracker: {e}")
+                            self.tracker = None
+                            self.tracker_initialized = False
+                        # cv2.rectangle(processed_frame_display, (x, y), (x + w, y + h), (0, 255, 0), 2) # Green for detection
 
+            # Perspective Warp Logic (uses self.current_bbox_for_warp)
+            if self.current_bbox_for_warp:
+                x, y, w, h = [int(v) for v in self.current_bbox_for_warp]
+                # Define target points as corners of the bounding box for warp
+                # This is a simplification; ideally, we'd get a better quad from contour or tracker if possible
+                # For CSRT/KCF, they give a bbox. We can use approxPolyDP on a mask from this bbox if needed.
+                # For now, using the bbox directly as the target quad.
+                temp_quad_points = np.array([
+                    [x, y], [x + w, y], [x + w, y + h], [x, y + h]
+                ], dtype=np.float32)
 
-                # We need 4 points for perspective transform.
-                # If approxPolyDP gives us 4 points, great. Otherwise, we might need more robust methods
-                # or fall back to bounding box.
-                if len(approx_quad) == 4:
-                    target_points = approx_quad.reshape(4, 2).astype(np.float32)
+                # Order points: top-left, top-right, bottom-right, bottom-left
+                rect = np.zeros((4, 2), dtype="float32")
+                s = temp_quad_points.sum(axis=1)
+                rect[0] = temp_quad_points[np.argmin(s)]
+                rect[2] = temp_quad_points[np.argmax(s)]
+                diff = np.diff(temp_quad_points, axis=1)
+                rect[1] = temp_quad_points[np.argmin(diff)]
+                rect[3] = temp_quad_points[np.argmax(diff)]
+                ordered_target_points = rect
 
-                    # Order points: top-left, top-right, bottom-right, bottom-left
-                    # This is crucial for cv2.getPerspectiveTransform
-                    rect = np.zeros((4, 2), dtype="float32")
-                    s = target_points.sum(axis=1)
-                    rect[0] = target_points[np.argmin(s)]
-                    rect[2] = target_points[np.argmax(s)]
-                    diff = np.diff(target_points, axis=1)
-                    rect[1] = target_points[np.argmin(diff)]
-                    rect[3] = target_points[np.argmax(diff)]
-                    ordered_target_points = rect
+                # Text Overlay (Warped)
+                text_to_overlay = self.text_entry_var.get()
+                if not text_to_overlay.strip(): text_to_overlay = " "
+                font_face = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 1.5
+                font_color_bgr = (0, 0, 0)
+                bg_color_bgr = (255, 255, 255)
+                thickness = 2
+                (text_w, text_h), baseline = cv2.getTextSize(text_to_overlay, font_face, font_scale, thickness)
+                padding = 20
+                src_w = text_w + 2 * padding
+                src_h = text_h + baseline + 2 * padding
+                text_texture = np.full((src_h, src_w, 3), bg_color_bgr, dtype=np.uint8)
+                text_origin_x = padding
+                text_origin_y = text_h + padding
+                cv2.putText(text_texture, text_to_overlay, (text_origin_x, text_origin_y), font_face, font_scale, font_color_bgr, thickness, cv2.LINE_AA)
+                source_points = np.array([[0, 0], [src_w - 1, 0], [src_w - 1, src_h - 1], [0, src_h - 1]], dtype=np.float32)
 
-                    # 2. Create the text image to warp
-                    text_to_overlay = self.text_entry_var.get()
-                    if not text_to_overlay.strip(): # Don't process if text is empty
-                        text_to_overlay = " " # Avoid errors with empty text size
-
-                    font_face = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = 1.5 # Made text larger for visibility
-                    font_color_bgr = (0, 0, 0) # Black text
-                    bg_color_bgr = (255, 255, 255) # White background for text texture
-                    thickness = 2
-
-                    # Estimate text size to create an appropriately sized source image
-                    # Add some padding
-                    (text_w, text_h), baseline = cv2.getTextSize(text_to_overlay, font_face, font_scale, thickness)
-                    padding = 20
-                    src_w = text_w + 2 * padding
-                    src_h = text_h + baseline + 2 * padding
-
-                    # Create source image (text texture)
-                    text_texture = np.full((src_h, src_w, 3), bg_color_bgr, dtype=np.uint8)
-                    text_origin_x = padding
-                    text_origin_y = text_h + padding # cv2.putText origin is bottom-left
-                    cv2.putText(text_texture, text_to_overlay, (text_origin_x, text_origin_y), font_face, font_scale, font_color_bgr, thickness, cv2.LINE_AA)
-
-                    # 3. Define source points for the text image (a simple rectangle)
-                    source_points = np.array([
-                        [0, 0],
-                        [src_w - 1, 0],
-                        [src_w - 1, src_h - 1],
-                        [0, src_h - 1]
-                    ], dtype=np.float32)
-
-                    # 4. Get the perspective transformation matrix
+                if ordered_target_points.shape == (4,2) and source_points.shape == (4,2): # Check if points are valid
                     matrix = cv2.getPerspectiveTransform(source_points, ordered_target_points)
-
-                    # 5. Warp the text image
                     warped_text_texture = cv2.warpPerspective(text_texture, matrix, (processed_frame_display.shape[1], processed_frame_display.shape[0]))
-
-                    # 6. Create a mask for blending (where text is not background)
-                    # For this simple case, white background means we make it transparent
-                    mask_for_blending = cv2.inRange(warped_text_texture, np.array([0,0,0]), np.array([250,250,250])) # Non-white parts
-                    mask_for_blending = cv2.bitwise_not(mask_for_blending) # Invert, so text is white, bg is black for mask
-
-                    # Blend
-                    # Black out the area of text on the original frame
+                    mask_for_blending = cv2.inRange(warped_text_texture, np.array([0,0,0]), np.array([250,250,250]))
+                    mask_for_blending = cv2.bitwise_not(mask_for_blending)
                     processed_frame_display = cv2.bitwise_and(processed_frame_display, processed_frame_display, mask=cv2.bitwise_not(mask_for_blending))
-                    # Add the warped text
                     processed_frame_display = cv2.bitwise_or(processed_frame_display, warped_text_texture, mask=mask_for_blending)
+                else:
+                    print("DEBUG: Invalid points for perspective transform.")
+            # --- End Processing Logic ---
 
-                else: # Fallback to bounding box text if not 4 points
-                    x, y, w, h = cv2.boundingRect(largest_contour)
-                    cv2.rectangle(processed_frame_display, (x, y), (x + w, y + h), (0, 255, 0), 2) # Green box
-                    text_to_overlay = self.text_entry_var.get()
-                    font_face = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = 0.8
-                    font_color = (255, 255, 255) # White
-                    thickness = 2
-                    (text_width, text_height), _ = cv2.getTextSize(text_to_overlay, font_face, font_scale, thickness)
-                    text_x = x + (w - text_width) // 2
-                    text_y = y + (h + text_height) // 2
-                    cv2.putText(processed_frame_display, text_to_overlay, (text_x, text_y), font_face, font_scale, font_color, thickness, cv2.LINE_AA)
-                # --- End Perspective Warp ---
+            # Display processed frame
+            target_processed_w = self.processed_video_label_width - 10 if self.processed_video_label_width > 20 else self.processed_video_label_width
+            target_processed_h = self.processed_video_label_height - 10 if self.processed_video_label_height > 20 else self.processed_video_label_height
+            resized_processed_frame = self._resize_frame_keep_aspect_ratio(processed_frame_display, target_processed_w, target_processed_h)
+            img_processed_tk = cv2.cvtColor(resized_processed_frame, cv2.COLOR_BGR2RGB) # Renamed to avoid conflict
+            img_processed_pil = Image.fromarray(img_processed_tk) # Renamed
+            imgtk_processed = ImageTk.PhotoImage(image=img_processed_pil) # Renamed
+            self.processed_video_label.imgtk = imgtk_processed
+            self.processed_video_label.configure(image=imgtk_processed)
+        else:
+            # If not processing, show default image on processed_video_label
+            self.processed_video_label.configure(image=self.default_video_img)
+            self.processed_video_label.image = self.default_video_img
 
 
-        # --- End Processing Logic ---
+        # Schedule next frame update
+        if self.camera_active: # Check if we should continue the loop
+            self.after_id_video_loop = self.root.after(15, self._update_video_feeds_loop)
 
-        # Convert frames for Tkinter display
-        # Resize raw frame
+    def on_closing(self):
+        print("DEBUG: Closing application...")
+        self.camera_active = False # Signal loop to stop
+        self.is_processing = False
+        if self.after_id_video_loop:
+            self.root.after_cancel(self.after_id_video_loop)
+            self.after_id_video_loop = None
+            print("DEBUG: Video loop canceled via after_cancel.")
+
+        if self.cap and self.cap.isOpened():
+            try:
+                self.cap.release()
+                print("DEBUG: Camera released in on_closing.")
+            except Exception as e:
+                print(f"DEBUG: Exception during camera release in on_closing: {e}")
+            finally:
+                self.cap = None
+        self.root.destroy()
+
+    # def run(self): # No longer needed, mainloop is called in __main__
         # Subtract a small amount for padding within the label, if any
         target_raw_w = self.raw_video_label_width - 10 if self.raw_video_label_width > 20 else self.raw_video_label_width
         target_raw_h = self.raw_video_label_height - 10 if self.raw_video_label_height > 20 else self.raw_video_label_height
