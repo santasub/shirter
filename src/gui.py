@@ -18,65 +18,107 @@ class App:
         self.upper_hsv = np.array([85, 255, 255])
         self.hsv_color_display = None # For showing selected color swatch
 
-        # Main layout frames
-        self.video_frame = ttk.Frame(self.root, padding="10")
-        self.video_frame.grid(row=0, column=0, sticky="nsew")
+        # --- Main PanedWindow Setup ---
+        self.main_paned_window = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=5)
+        self.main_paned_window.pack(fill=tk.BOTH, expand=True)
 
-        self.control_frame = ttk.Frame(self.root, padding="10")
-        self.control_frame.grid(row=0, column=1, sticky="nsew")
+        # --- Video Frame (Left Pane) ---
+        self.video_frame = ttk.Frame(self.main_paned_window, padding="5")
+        # self.video_frame.pack(fill=tk.BOTH, expand=True) # pack/grid is handled by add
+        self.main_paned_window.add(self.video_frame, stretch="always", minsize=300) # stretch="always"
 
-        self.root.grid_rowconfigure(0, weight=1)
-        self.root.grid_columnconfigure(0, weight=3)
-        self.root.grid_columnconfigure(1, weight=1)
+        # --- Control Frame (Right Pane) ---
+        self.control_frame = ttk.Frame(self.main_paned_window, padding="5")
+        # self.control_frame.pack(fill=tk.BOTH, expand=True) # pack/grid is handled by add
+        self.main_paned_window.add(self.control_frame, stretch="never", minsize=280) # stretch="never" or "first"
 
-        # --- Video Display Area ---
+        # self.root.grid_rowconfigure(0, weight=1) # Not needed with PanedWindow filling root
+        # self.root.grid_columnconfigure(0, weight=3)
+        # self.root.grid_columnconfigure(1, weight=1)
+
+        # --- Video Display Area (within self.video_frame) ---
         # Set a default size for video labels to prevent collapsing
         self.default_video_bg = Image.new('RGB', (640, 480), (100, 100, 100))
         self.default_video_img = ImageTk.PhotoImage(self.default_video_bg)
 
         self.raw_video_label = ttk.Label(self.video_frame, image=self.default_video_img)
-        self.raw_video_label.pack(pady=5, padx=5, expand=True, fill="both")
+        self.raw_video_label.pack(pady=5, padx=5, expand=True, fill="both") # fill and expand within video_frame
 
         self.processed_video_label = ttk.Label(self.video_frame, image=self.default_video_img)
-        self.processed_video_label.pack(pady=5, padx=5, expand=True, fill="both")
+        self.processed_video_label.pack(pady=5, padx=5, expand=True, fill="both") # fill and expand within video_frame
 
-        # --- Control Panel Area ---
+        # Store current dimensions of video labels for resizing
+        self.raw_video_label_width = self.default_video_bg.width
+        self.raw_video_label_height = self.default_video_bg.height
+        self.processed_video_label_width = self.default_video_bg.width
+        self.processed_video_label_height = self.default_video_bg.height
+
+        self.raw_video_label.bind("<Configure>", self._on_raw_video_resize)
+        self.processed_video_label.bind("<Configure>", self._on_processed_video_resize)
+
+
+        # --- Control Panel Area (within self.control_frame) ---
+        # Ensure control_frame itself can resize its content if window is very tall
+        self.control_frame.grid_rowconfigure(0, weight=0) # Camera setup at top
+        self.control_frame.grid_rowconfigure(1, weight=0) # Color frame
+        self.control_frame.grid_rowconfigure(2, weight=0) # Text overlay
+        self.control_frame.grid_rowconfigure(3, weight=0) # Logo overlay
+        self.control_frame.grid_rowconfigure(4, weight=0) # ROI Frame
+        self.control_frame.grid_rowconfigure(5, weight=1) # Spacer or empty row to push button to bottom
+        self.control_frame.grid_rowconfigure(6, weight=0) # Button at bottom
+        self.control_frame.grid_columnconfigure(0, weight=1)
+
+
         # Camera Selection
         camera_select_frame = ttk.LabelFrame(self.control_frame, text="Camera Setup")
-        camera_select_frame.pack(fill="x", expand=False, padx=5, pady=5) # expand=False
+        # camera_select_frame.pack(fill="x", expand=False, padx=5, pady=5)
+        camera_select_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
 
         self.camera_var = tk.StringVar()
-        self.available_cameras = self._list_available_cameras() # Populate here, before GUI elements use it
+        # Call _list_available_cameras to keep that part of the startup sequence for logging,
+        # but its results won't be used for the OptionMenu in this test.
+        self.available_cameras = self._list_available_cameras()
+        print(f"DEBUG: self.available_cameras after call: {self.available_cameras}")
 
+
+        # --- Simplified OptionMenu Test (or chosen camera selection widget) ---
+        # Reverting to the dynamic list population for now, assuming the PanedWindow might interact differently
+        # or that we still need to test this part. If it crashes, we'll know the PanedWindow didn't solve it.
+        print("DEBUG: Attempting to create OptionMenu with dynamic values.")
         camera_names = list(self.available_cameras.keys())
-        initial_cam_name = ""
+        initial_cam_name = "No cameras found" # Default if nothing found or list is empty
         cam_dropdown_state = "disabled"
 
-        if camera_names:
+        if camera_names: # If actual cameras were found
             initial_cam_name = camera_names[0]
             cam_dropdown_state = "readonly"
-        else:
-            # If no cameras, add a dummy entry for display and keep disabled
-            camera_names = ["No cameras found"]
-            initial_cam_name = camera_names[0]
-            # self.available_cameras will remain empty or be {'No cameras found': -1} from _list_available_cameras
-            # Ensure self.available_cameras has this key if we rely on it later for index
-            if not self.available_cameras: # If _list_available_cameras returned truly empty
+        else: # No actual cameras found, ensure 'No cameras found' is in the list for display
+            camera_names = [initial_cam_name]
+            if initial_cam_name not in self.available_cameras:
                  self.available_cameras[initial_cam_name] = -1
 
+        try:
+            self.camera_var.set(initial_cam_name)
+            self.camera_dropdown = ttk.OptionMenu(camera_select_frame, self.camera_var,
+                                                  initial_cam_name, *camera_names)
+            self.camera_dropdown.pack(pady=5, padx=5, fill="x")
+            self.camera_dropdown.config(state=cam_dropdown_state)
+            print(f"DEBUG: Successfully created OptionMenu with dynamic values: default='{initial_cam_name}', options='{camera_names}'")
+        except Exception as e:
+            print(f"DEBUG: CRITICAL - Exception during OptionMenu creation: {e}")
+            self.camera_dropdown = ttk.Label(camera_select_frame, text="OptionMenu failed.")
+            self.camera_dropdown.pack(pady=5, padx=5, fill="x")
+        # --- End Camera Selection Widget ---
 
-        self.camera_var.set(initial_cam_name)
-        self.camera_dropdown = ttk.OptionMenu(camera_select_frame, self.camera_var,
-                                              initial_cam_name, *camera_names) # Pass initial_cam_name as the default
-        self.camera_dropdown.pack(pady=5, padx=5, fill="x")
-        self.camera_dropdown.config(state=cam_dropdown_state)
 
         # Color Selection (HSV)
         self.color_frame = ttk.LabelFrame(self.control_frame, text="Shirt Color (HSV)")
-        self.color_frame.pack(fill="x", expand=False, padx=5, pady=5) # expand=False
+        # self.color_frame.pack(fill="x", expand=False, padx=5, pady=5)
+        self.color_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=5)
+
 
         self.pick_color_button = ttk.Button(self.color_frame, text="Pick Shirt Color (from Preview)", command=self.enable_color_picker_mode)
-        self.pick_color_button.pack(pady=2)
+        self.pick_color_button.pack(pady=2) # .pack within its LabelFrame is fine
         self.color_picker_mode = False
 
         # Display for the chosen color
@@ -84,9 +126,11 @@ class App:
         self.hsv_color_display_label.pack(pady=2)
         self.hsv_color_swatch = tk.Label(self.color_frame, background="grey", width=10, height=2)
         self.hsv_color_swatch.pack(pady=2)
-        self._update_color_swatch(self.lower_hsv, self.upper_hsv) # Initial swatch
+        self._update_color_swatch(self.lower_hsv, self.upper_hsv)
 
-        # Manual HSV Sliders
+        # Manual HSV Sliders (within color_frame)
+        hsv_sliders_frame = ttk.Frame(self.color_frame) # Frame to hold sliders for better packing
+        hsv_sliders_frame.pack(fill="x", expand=True)
         self.hsv_sliders = {}
         for i, label in enumerate(["H_low", "S_low", "V_low", "H_high", "S_high", "V_high"]):
             val = self.lower_hsv[i % 3] if "low" in label else self.upper_hsv[i % 3]
@@ -98,30 +142,73 @@ class App:
 
         # Text Overlay
         text_overlay_frame = ttk.LabelFrame(self.control_frame, text="Text Overlay")
-        text_overlay_frame.pack(fill="x", expand=False, padx=5, pady=5) # expand=False
+        # text_overlay_frame.pack(fill="x", expand=False, padx=5, pady=5)
+        text_overlay_frame.grid(row=2, column=0, sticky="ew", padx=5, pady=5)
 
         self.text_entry_var = tk.StringVar(value="DJ SHIRT")
         self.text_entry = ttk.Entry(text_overlay_frame, textvariable=self.text_entry_var)
-        self.text_entry.pack(pady=5, padx=5, fill="x")
+        self.text_entry.pack(pady=5, padx=5, fill="x") # .pack within its LabelFrame is fine
 
         # Logo Overlay
         logo_overlay_frame = ttk.LabelFrame(self.control_frame, text="Logo Overlay")
-        logo_overlay_frame.pack(fill="x", expand=False, padx=5, pady=5) # expand=False
+        # logo_overlay_frame.pack(fill="x", expand=False, padx=5, pady=5)
+        logo_overlay_frame.grid(row=3, column=0, sticky="ew", padx=5, pady=5)
 
-        ttk.Button(logo_overlay_frame, text="Upload Logo", command=self.upload_logo).pack(pady=2)
+        ttk.Button(logo_overlay_frame, text="Upload Logo", command=self.upload_logo).pack(pady=2) # .pack
         self.logo_path_var = tk.StringVar(value="No logo selected.")
-        ttk.Label(logo_overlay_frame, textvariable=self.logo_path_var, wraplength=180).pack(pady=2, padx=5, fill="x")
+        ttk.Label(logo_overlay_frame, textvariable=self.logo_path_var, wraplength=180).pack(pady=2, padx=5, fill="x") # .pack
 
         # ROI Definition (Placeholder)
         roi_frame = ttk.LabelFrame(self.control_frame, text="Overlay Regions (ROI)")
-        roi_frame.pack(fill="x", expand=False, padx=5, pady=5) # expand=False
-        ttk.Button(roi_frame, text="Define Shirt Regions", command=self.define_roi, state=tk.DISABLED).pack(pady=5) # Disabled for now
+        # roi_frame.pack(fill="x", expand=False, padx=5, pady=5)
+        roi_frame.grid(row=4, column=0, sticky="ew", padx=5, pady=5)
+        ttk.Button(roi_frame, text="Define Shirt Regions", command=self.define_roi, state=tk.DISABLED).pack(pady=5) # .pack
+
+        # Spacer Frame to push button to bottom
+        spacer_frame = ttk.Frame(self.control_frame) # No padding, just to take up space
+        spacer_frame.grid(row=5, column=0, sticky="nsew")
+        # self.control_frame.grid_rowconfigure(5, weight=1) # Already done above
 
         # Start/Stop Button
         self.start_stop_button = ttk.Button(self.control_frame, text="Start Processing", command=self.toggle_processing)
-        self.start_stop_button.pack(pady=10, padx=5, fill="x", side=tk.BOTTOM)
+        # self.start_stop_button.pack(pady=10, padx=5, fill="x", side=tk.BOTTOM)
+        self.start_stop_button.grid(row=6, column=0, sticky="ew", padx=5, pady=10)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing) # Handle window close
+
+    def _on_raw_video_resize(self, event):
+        self.raw_video_label_width = event.width
+        self.raw_video_label_height = event.height
+
+    def _on_processed_video_resize(self, event):
+        self.processed_video_label_width = event.width
+        self.processed_video_label_height = event.height
+
+    def _resize_frame_keep_aspect_ratio(self, frame, target_width, target_height):
+        if target_width <= 0 or target_height <= 0: # Avoid division by zero or invalid sizes
+            return frame
+
+        original_height, original_width = frame.shape[:2]
+        if original_width == 0 or original_height == 0:
+            return frame # Invalid original frame
+
+        # Calculate aspect ratios
+        original_aspect = original_width / original_height
+        target_aspect = target_width / target_height
+
+        if original_aspect > target_aspect:
+            # Original is wider than target, so fit to width
+            new_width = target_width
+            new_height = int(new_width / original_aspect)
+        else:
+            # Original is taller than target (or same aspect), so fit to height
+            new_height = target_height
+            new_width = int(new_height * original_aspect)
+
+        if new_width <=0 or new_height <=0: # if calculation results in zero for a dim
+            return frame
+
+        return cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
 
     def _list_available_cameras(self):
         """Lists available camera devices and their indices."""
@@ -427,20 +514,24 @@ class App:
         # --- End Processing Logic ---
 
         # Convert frames for Tkinter display
-        # Raw frame (original from camera)
-        img_raw = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Resize raw frame
+        # Subtract a small amount for padding within the label, if any
+        target_raw_w = self.raw_video_label_width - 10 if self.raw_video_label_width > 20 else self.raw_video_label_width
+        target_raw_h = self.raw_video_label_height - 10 if self.raw_video_label_height > 20 else self.raw_video_label_height
+
+        resized_raw_frame = self._resize_frame_keep_aspect_ratio(frame, target_raw_w, target_raw_h)
+        img_raw = cv2.cvtColor(resized_raw_frame, cv2.COLOR_BGR2RGB)
         img_raw = Image.fromarray(img_raw)
         imgtk_raw = ImageTk.PhotoImage(image=img_raw)
         self.raw_video_label.imgtk = imgtk_raw
         self.raw_video_label.configure(image=imgtk_raw)
 
-        # Processed frame (with mask or overlays)
-        # For now, let's display the mask on the processed_video_label
-        # Later, this will be frame_with_overlays
-        img_processed = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB) # Display mask
-        # To display the frame with bounding box and warped text:
-        img_processed = cv2.cvtColor(processed_frame_display, cv2.COLOR_BGR2RGB)
+        # Resize processed frame (which is processed_frame_display)
+        target_processed_w = self.processed_video_label_width - 10 if self.processed_video_label_width > 20 else self.processed_video_label_width
+        target_processed_h = self.processed_video_label_height - 10 if self.processed_video_label_height > 20 else self.processed_video_label_height
 
+        resized_processed_frame = self._resize_frame_keep_aspect_ratio(processed_frame_display, target_processed_w, target_processed_h)
+        img_processed = cv2.cvtColor(resized_processed_frame, cv2.COLOR_BGR2RGB)
         img_processed = Image.fromarray(img_processed)
         imgtk_processed = ImageTk.PhotoImage(image=img_processed)
         self.processed_video_label.imgtk = imgtk_processed
