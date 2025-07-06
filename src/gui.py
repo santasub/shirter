@@ -207,7 +207,7 @@ class App:
         self.camera_var.set(self.initial_cam_name)
         # Add command to OptionMenu to handle camera changes
         try:
-            # self.camera_var.set(self.initial_cam_name) # Already set above the try block
+            # self.camera_var.set(self.initial_cam_name) # Already set above
             self.camera_dropdown = tk.OptionMenu(camera_select_frame, self.camera_var, *camera_names, command=self._on_camera_select)
             self.camera_dropdown.pack(pady=5, padx=5, fill="x")
             self.camera_dropdown.config(state=cam_dropdown_state) # cam_dropdown_state is tk.NORMAL or tk.DISABLED
