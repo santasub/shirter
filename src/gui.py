@@ -27,10 +27,31 @@ class App:
         # self.video_frame.pack(fill=tk.BOTH, expand=True) # pack/grid is handled by add
         self.main_paned_window.add(self.video_frame, stretch="always", minsize=300) # stretch="always"
 
-        # --- Control Frame (Right Pane) ---
-        self.control_frame = ttk.Frame(self.main_paned_window, padding="5")
-        # self.control_frame.pack(fill=tk.BOTH, expand=True) # pack/grid is handled by add
-        self.main_paned_window.add(self.control_frame, stretch="never", minsize=280) # stretch="never" or "first"
+        # --- Control Frame (Right Pane) - This will now contain the canvas and scrollbar ---
+        self.outer_control_frame = ttk.Frame(self.main_paned_window, padding="0") # Padding will be on inner frame
+        self.main_paned_window.add(self.outer_control_frame, stretch="never", minsize=280)
+
+        # Create a Canvas widget for scrolling
+        self.control_canvas = tk.Canvas(self.outer_control_frame)
+        self.control_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Add a Scrollbar to the Canvas
+        self.scrollbar = ttk.Scrollbar(self.outer_control_frame, orient=tk.VERTICAL, command=self.control_canvas.yview)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.control_canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        # Create a frame inside the canvas that will hold all the controls
+        # This is the frame that will be scrolled.
+        self.control_frame = ttk.Frame(self.control_canvas, padding="5") # Actual frame for controls
+        self.control_canvas_window = self.control_canvas.create_window((0, 0), window=self.control_frame, anchor="nw")
+
+        # Bind the canvas to update scrollregion when the inner frame's size changes
+        self.control_frame.bind("<Configure>", lambda e: self.control_canvas.configure(scrollregion=self.control_canvas.bbox("all")))
+        # Bind mousewheel scrolling (platform-dependent)
+        self._bind_mousewheel(self.control_canvas)
+        self._bind_mousewheel(self.outer_control_frame) # Also bind to outer frame
+        self._bind_mousewheel(self.control_frame) # And inner frame, just in case
+
 
         # self.root.grid_rowconfigure(0, weight=1) # Not needed with PanedWindow filling root
         # self.root.grid_columnconfigure(0, weight=3)
@@ -99,14 +120,22 @@ class App:
 
         try:
             self.camera_var.set(initial_cam_name)
-            self.camera_dropdown = ttk.OptionMenu(camera_select_frame, self.camera_var,
-                                                  initial_cam_name, *camera_names)
+            # Using tk.OptionMenu instead of ttk.OptionMenu
+            self.camera_dropdown = tk.OptionMenu(camera_select_frame, self.camera_var,
+                                                 *camera_names) # initial_cam_name is set via camera_var
             self.camera_dropdown.pack(pady=5, padx=5, fill="x")
-            self.camera_dropdown.config(state=cam_dropdown_state)
-            print(f"DEBUG: Successfully created OptionMenu with dynamic values: default='{initial_cam_name}', options='{camera_names}'")
+
+            # State handling for tk.OptionMenu (disable/enable directly)
+            if cam_dropdown_state == "disabled":
+                self.camera_dropdown.config(state=tk.DISABLED)
+            else: # "readonly" for ttk is effectively "normal" for tk if var is controlled
+                self.camera_dropdown.config(state=tk.NORMAL)
+
+            print(f"DEBUG: Successfully created tk.OptionMenu with dynamic values: default='{initial_cam_name}', options='{camera_names}'")
         except Exception as e:
-            print(f"DEBUG: CRITICAL - Exception during OptionMenu creation: {e}")
-            self.camera_dropdown = ttk.Label(camera_select_frame, text="OptionMenu failed.")
+            print(f"DEBUG: CRITICAL - Exception during tk.OptionMenu creation: {e}")
+            # Fallback to Label
+            self.camera_dropdown = ttk.Label(camera_select_frame, text="tk.OptionMenu failed.") # Using ttk.Label for consistency if it's just a fallback
             self.camera_dropdown.pack(pady=5, padx=5, fill="x")
         # --- End Camera Selection Widget ---
 
@@ -128,17 +157,63 @@ class App:
         self.hsv_color_swatch.pack(pady=2)
         self._update_color_swatch(self.lower_hsv, self.upper_hsv)
 
-        # Manual HSV Sliders (within color_frame)
+        # --- New Tolerance/Range Sliders ---
+        ttk.Label(self.color_frame, text="Picked Color Tolerances:").pack(pady=(5,0))
+
+        # Hue Tolerance
+        self.hue_tolerance_var = tk.IntVar(value=10) # Default H tolerance
+        self.base_h_picked = -1 # Will store the H value from click
+        hue_tolerance_slider_frame = ttk.Frame(self.color_frame)
+        hue_tolerance_slider_frame.pack(fill="x", expand=True)
+        ttk.Label(hue_tolerance_slider_frame, text="H Tol:").pack(side=tk.LEFT, padx=2)
+        self.hue_tolerance_slider = tk.Scale(hue_tolerance_slider_frame, from_=0, to=30, orient=tk.HORIZONTAL, variable=self.hue_tolerance_var, command=self._update_hsv_from_tolerance_sliders, length=150)
+        self.hue_tolerance_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
+
+        # Saturation Range
+        self.s_min_var = tk.IntVar(value=50)
+        self.s_max_var = tk.IntVar(value=255)
+        self.base_s_picked = -1
+        s_range_frame = ttk.Frame(self.color_frame)
+        s_range_frame.pack(fill="x", expand=True, pady=2)
+        ttk.Label(s_range_frame, text="S Min:").pack(side=tk.LEFT, padx=2)
+        self.s_min_slider = tk.Scale(s_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.s_min_var, command=self._update_hsv_from_tolerance_sliders, length=150)
+        self.s_min_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
+        ttk.Label(s_range_frame, text="S Max:").pack(side=tk.LEFT, padx=2)
+        self.s_max_slider = tk.Scale(s_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.s_max_var, command=self._update_hsv_from_tolerance_sliders, length=150)
+        self.s_max_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
+
+        # Value Range
+        self.v_min_var = tk.IntVar(value=50)
+        self.v_max_var = tk.IntVar(value=255)
+        self.base_v_picked = -1
+        v_range_frame = ttk.Frame(self.color_frame)
+        v_range_frame.pack(fill="x", expand=True, pady=2)
+        ttk.Label(v_range_frame, text="V Min:").pack(side=tk.LEFT, padx=2)
+        self.v_min_slider = tk.Scale(v_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.v_min_var, command=self._update_hsv_from_tolerance_sliders, length=150)
+        self.v_min_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
+        ttk.Label(v_range_frame, text="V Max:").pack(side=tk.LEFT, padx=2)
+        self.v_max_slider = tk.Scale(v_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.v_max_var, command=self._update_hsv_from_tolerance_sliders, length=150)
+        self.v_max_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
+
+        # --- Main 6 HSV Sliders (now display the calculated range) ---
+        ttk.Label(self.color_frame, text="Resulting HSV Range:").pack(pady=(5,0))
         hsv_sliders_frame = ttk.Frame(self.color_frame) # Frame to hold sliders for better packing
         hsv_sliders_frame.pack(fill="x", expand=True)
-        self.hsv_sliders = {}
+        self.hsv_sliders = {} # These will display the final range
         for i, label in enumerate(["H_low", "S_low", "V_low", "H_high", "S_high", "V_high"]):
             val = self.lower_hsv[i % 3] if "low" in label else self.upper_hsv[i % 3]
             max_val = 179 if "H_" in label else 255
-            scale = tk.Scale(self.color_frame, from_=0, to=max_val, orient=tk.HORIZONTAL, label=label, length=200, command=self._update_hsv_from_sliders)
+            # These main sliders are now for display, or direct override. Their command is _update_hsv_from_main_sliders
+            scale = tk.Scale(hsv_sliders_frame, from_=0, to=max_val, orient=tk.HORIZONTAL, label=label, length=200, command=self._update_hsv_from_main_sliders)
             scale.set(val)
-            scale.pack(fill="x", padx=2)
+            scale.pack(fill="x", padx=2) # pack into hsv_sliders_frame
             self.hsv_sliders[label] = scale
+
+        # Initialize base picked colors to something neutral if not picked yet
+        if self.base_h_picked == -1: self.base_h_picked = (self.lower_hsv[0] + self.upper_hsv[0]) // 2
+        if self.base_s_picked == -1: self.base_s_picked = 128
+        if self.base_v_picked == -1: self.base_v_picked = 128
+        self._update_hsv_from_tolerance_sliders() # Initial calculation
 
         # Text Overlay
         text_overlay_frame = ttk.LabelFrame(self.control_frame, text="Text Overlay")
@@ -175,6 +250,17 @@ class App:
         self.start_stop_button.grid(row=6, column=0, sticky="ew", padx=5, pady=10)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing) # Handle window close
+
+    def _bind_mousewheel(self, widget):
+        # Platform-specific mousewheel binding
+        # For Linux, events are Button-4 and Button-5
+        # For Windows and macOS, event is <MouseWheel>
+        if sys.platform == "linux":
+            widget.bind_all("<Button-4>", lambda e: self.control_canvas.yview_scroll(-1, "units"), add="+")
+            widget.bind_all("<Button-5>", lambda e: self.control_canvas.yview_scroll(1, "units"), add="+")
+        else: # Windows, macOS
+            widget.bind_all("<MouseWheel>", lambda e: self.control_canvas.yview_scroll(int(-1*(e.delta/120)), "units"), add="+")
+
 
     def _on_raw_video_resize(self, event):
         self.raw_video_label_width = event.width
@@ -254,10 +340,69 @@ class App:
         self.upper_hsv[1] = self.hsv_sliders["S_high"].get()
         self.upper_hsv[2] = self.hsv_sliders["V_high"].get()
         self._update_color_swatch(self.lower_hsv, self.upper_hsv)
+        # When main sliders are moved, it implies direct manipulation, potentially overriding the "picked + tolerance" logic.
+        # We might need to update base_h_picked etc. here, or provide a button to "reset to picked + tolerance"
+        # For now, this direct override is fine.
+
+    def _update_hsv_from_tolerance_sliders(self, event=None):
+        if self.base_h_picked == -1: # No color picked yet, or reset
+            # If no color is picked, the tolerance sliders might not have a meaningful base.
+            # Option 1: Disable tolerance sliders until a color is picked.
+            # Option 2: Let them adjust the current H_low/H_high, S_low/S_high etc. directly,
+            #           which is effectively what _update_hsv_from_main_sliders does.
+            # For now, let's assume they adjust the current self.lower_hsv/upper_hsv if no base is picked,
+            # or we ensure a base is picked/defaulted.
+            # The current initial _update_hsv_from_tolerance_sliders call in __init__ will set a default range.
+            # Let's ensure base_h_picked is set from current lower/upper if it's -1
+            # This makes the tolerance sliders always work relative to *some* base H.
+            current_h_low = self.hsv_sliders["H_low"].get()
+            current_h_high = self.hsv_sliders["H_high"].get()
+            self.base_h_picked = (current_h_low + current_h_high) // 2
+            # S and V min/max are directly set by their sliders, no base_s/v needed for calculation from tolerance.
+
+        h_tolerance = self.hue_tolerance_var.get()
+
+        # Calculate Hue range based on base_h_picked and tolerance
+        # Handle Hue wrap-around (0-179 degrees)
+        # A simple way:
+        h_low = self.base_h_picked - h_tolerance
+        h_high = self.base_h_picked + h_tolerance
+
+        if h_low < 0: h_low = 0 # Clamp, or handle wrap-around for more complex scenarios
+        if h_high > 179: h_high = 179 # Clamp
+
+        # For more robust hue that wraps (e.g. if base_H is 5, tol is 10, range is 175-15):
+        # This requires splitting into two ranges if it wraps, which cv2.inRange handles if called twice.
+        # For simplicity with single range sliders, we'll use simple clamping for now.
+        # If we wanted true hue wrapping, the UI would need to show two ranges or the mask logic change.
+
+        self.lower_hsv[0] = h_low
+        self.upper_hsv[0] = h_high
+
+        self.lower_hsv[1] = self.s_min_var.get()
+        self.upper_hsv[1] = self.s_max_var.get()
+        self.lower_hsv[2] = self.v_min_var.get()
+        self.upper_hsv[2] = self.v_max_var.get()
+
+        # Ensure min <= max for S and V
+        if self.lower_hsv[1] > self.upper_hsv[1]: self.lower_hsv[1] = self.upper_hsv[1]
+        if self.lower_hsv[2] > self.upper_hsv[2]: self.lower_hsv[2] = self.upper_hsv[2]
+
+        # Update the 6 main display sliders
+        self.hsv_sliders["H_low"].set(self.lower_hsv[0])
+        self.hsv_sliders["S_low"].set(self.lower_hsv[1])
+        self.hsv_sliders["V_low"].set(self.lower_hsv[2])
+        self.hsv_sliders["H_high"].set(self.upper_hsv[0])
+        self.hsv_sliders["S_high"].set(self.upper_hsv[1])
+        self.hsv_sliders["V_high"].set(self.upper_hsv[2])
+
+        self._update_color_swatch(self.lower_hsv, self.upper_hsv)
+
 
     def _update_color_swatch(self, lower_hsv, upper_hsv):
         # Create an average color for the swatch
-        avg_h = int((lower_hsv[0] + upper_hsv[0]) / 2)
+        # Ensure lower <= upper for sensible average calculation, though GUI should enforce this.
+        avg_h = int((max(0,lower_hsv[0]) + min(179,upper_hsv[0])) / 2)
         avg_s = int((lower_hsv[1] + upper_hsv[1]) / 2)
         avg_v = int((lower_hsv[2] + upper_hsv[2]) / 2)
 
@@ -287,34 +432,44 @@ class App:
             height, width, _ = self.current_raw_frame_for_picker.shape
             if 0 <= y < height and 0 <= x < width:
                 bgr_color = self.current_raw_frame_for_picker[y, x]
-                hsv_color = cv2.cvtColor(np.uint8([[bgr_color]]), cv2.COLOR_BGR2HSV)[0][0]
-                print(f"Clicked BGR: {bgr_color}, HSV: {hsv_color}")
+                hsv_color_numpy = cv2.cvtColor(np.uint8([[bgr_color]]), cv2.COLOR_BGR2HSV)[0][0]
 
-                # Set a small range around the picked H value, and broader S, V
-                # These tolerances might need to be configurable
-                hue_tolerance = 10
-                saturation_tolerance_low = 50
-                value_tolerance_low = 50
-                saturation_tolerance_high = 255
-                value_tolerance_high = 255
+                # Convert numpy.uint8 to standard Python int before arithmetic
+                h_picked = int(hsv_color_numpy[0])
+                s_picked = int(hsv_color_numpy[1])
+                v_picked = int(hsv_color_numpy[2])
+                print(f"Clicked BGR: {bgr_color}, Picked HSV: ({h_picked}, {s_picked}, {v_picked})")
 
+                # --- Store the picked base color ---
+                self.base_h_picked = h_picked
+                self.base_s_picked = s_picked
+                self.base_v_picked = v_picked
 
-                self.lower_hsv[0] = max(0, hsv_color[0] - hue_tolerance)
-                self.upper_hsv[0] = min(179, hsv_color[0] + hue_tolerance)
-                self.lower_hsv[1] = max(0, hsv_color[1] - saturation_tolerance_low) # Or a fixed low like 50-100
-                self.upper_hsv[1] = min(255, hsv_color[1] + saturation_tolerance_high) # Or fixed high 255
-                self.lower_hsv[2] = max(0, hsv_color[2] - value_tolerance_low) # Or a fixed low like 50-100
-                self.upper_hsv[2] = min(255, hsv_color[2] + value_tolerance_high) # Or fixed high 255
+                # --- Update the new tolerance/range sliders based on the picked color ---
+                # (Assuming these sliders and their variables like self.hue_tolerance_var exist)
+                # For now, I'll just print what would be set. Actual slider creation is next.
 
-                # Update sliders
-                self.hsv_sliders["H_low"].set(self.lower_hsv[0])
-                self.hsv_sliders["S_low"].set(self.lower_hsv[1])
-                self.hsv_sliders["V_low"].set(self.lower_hsv[2])
-                self.hsv_sliders["H_high"].set(self.upper_hsv[0])
-                self.hsv_sliders["S_high"].set(self.upper_hsv[1])
-                self.hsv_sliders["V_high"].set(self.upper_hsv[2])
+                # Example: Set default tolerances/ranges after picking
+                # These values would ideally come from default settings for the new sliders
+                default_hue_tolerance = 10
+                default_s_min = max(0, s_picked - 75)
+                default_s_max = min(255, s_picked + 75)
+                default_v_min = max(0, v_picked - 75)
+                default_v_max = min(255, v_picked + 75)
 
-                self._update_color_swatch(self.lower_hsv, self.upper_hsv)
+                if hasattr(self, 'hue_tolerance_slider'): # Check if new sliders are implemented
+                    self.hue_tolerance_var.set(default_hue_tolerance)
+                    self.s_min_var.set(default_s_min)
+                    self.s_max_var.set(default_s_max)
+                    self.v_min_var.set(default_v_min)
+                    self.v_max_var.set(default_v_max)
+                    # This will trigger the calculation and update of main sliders
+                    self._update_hsv_from_tolerance_sliders()
+                # Removed the 'else' block that had the direct old calculation,
+                # as the new sliders are now considered implemented.
+
+                print(f"DEBUG: Base HSV set to: H={self.base_h_picked}, S={self.base_s_picked}, V={self.base_v_picked}")
+                print(f"DEBUG: Tolerance/Range sliders set to: H_tol={self.hue_tolerance_var.get()}, S_range=({self.s_min_var.get()}-{self.s_max_var.get()}), V_range=({self.v_min_var.get()}-{self.v_max_var.get()})")
 
             self.color_picker_mode = False
             self.pick_color_button.config(text="Pick Shirt Color (from Preview)", state=tk.NORMAL)
@@ -378,8 +533,14 @@ class App:
 
             print("Processing Stopped")
             if self.cap:
-                self.cap.release()
-                self.cap = None
+                try:
+                    if self.cap.isOpened(): # Only release if it was actually opened
+                        self.cap.release()
+                        print("DEBUG: Camera released in toggle_processing.")
+                except Exception as e:
+                    print(f"DEBUG: Exception during camera release in toggle_processing: {e}")
+                finally:
+                    self.cap = None
             # Reset video labels to default image when stopping
             self.raw_video_label.configure(image=self.default_video_img)
             self.raw_video_label.image = self.default_video_img # Keep a reference
@@ -544,7 +705,14 @@ class App:
         if self.is_processing:
             self.is_processing = False # Stop the loop
         if self.cap:
-            self.cap.release()
+            try:
+                if self.cap.isOpened():
+                    self.cap.release()
+                    print("DEBUG: Camera released in on_closing.")
+            except Exception as e:
+                print(f"DEBUG: Exception during camera release in on_closing: {e}")
+            finally:
+                self.cap = None
         self.root.destroy()
 
     # def run(self): # No longer needed, mainloop is called in __main__
@@ -555,5 +723,6 @@ if __name__ == '__main__':
     import sys # For sys.platform
     root = tk.Tk()
     app = App(root)
-    root.minsize(900, 700)
+    # Increased minimum height to better accommodate all control panel widgets
+    root.minsize(900, 750)
     root.mainloop()
