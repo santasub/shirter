@@ -93,6 +93,7 @@ class App:
         self.camera_active = False  # Flag to control the unified video loop
         self.after_id_video_loop = None  # To store ID of root.after() call
         self.is_processing = False # Ensure this is initialized before _initial_camera_start might use it implicitly
+        self.show_mask_preview = tk.BooleanVar(value=False) # For mask preview checkbox
 
         # Attempt to start initial camera preview
         self._initial_camera_start()
@@ -229,6 +230,10 @@ class App:
         self.hsv_color_swatch = tk.Label(color_frame, background="grey", width=10, height=2)
         self.hsv_color_swatch.pack(pady=2)
         self._update_color_swatch(self.lower_hsv, self.upper_hsv)
+
+        # Checkbox for showing mask
+        self.show_mask_checkbox = ttk.Checkbutton(color_frame, text="Show Segmentation Mask", variable=self.show_mask_preview)
+        self.show_mask_checkbox.pack(pady=(5,2))
 
         ttk.Label(color_frame, text="Picked Color Tolerances:").pack(pady=(5,0))
         self.hue_tolerance_var = tk.IntVar(value=10)
@@ -492,16 +497,30 @@ class App:
                 # For now, I'll just print what would be set. Actual slider creation is next.
 
                 # Example: Set default tolerances/ranges after picking
-                # These values would ideally come from default settings for the new sliders
-                default_hue_tolerance = 10
-                default_s_min = max(0, s_picked - 75)
-                default_s_max = min(255, s_picked + 75)
-                default_v_min = max(0, v_picked - 75)
-                default_v_max = min(255, v_picked + 75)
+                # These values provide a starting point for the Saturation and Value range sliders.
+                # Hue will use base_h_picked and the hue_tolerance_slider.
 
-                if hasattr(self, 'hue_tolerance_slider'): # Check if new sliders are implemented
-                    self.hue_tolerance_var.set(default_hue_tolerance)
-                    self.s_min_var.set(default_s_min)
+                # Hue Tolerance Slider: Reset to a default value (e.g., 10 or 15)
+                # This allows the user to always know the starting tolerance for H.
+                # Or, we could make it adaptive too, but a fixed default tolerance is simpler.
+                self.hue_tolerance_var.set(10) # Reset hue tolerance to default
+
+                # Saturation Range: Set a tighter, more adaptive default range around s_picked
+                default_s_low = max(0, s_picked - 40)
+                default_s_high = min(255, s_picked + 40) # Symmetrical for now, can be asymmetric
+                # Ensure low <= high, especially if s_picked is near 0 or 255
+                if default_s_low > default_s_high: default_s_low = default_s_high
+
+                # Value Range: Similar adaptive default range around v_picked
+                default_v_low = max(0, v_picked - 50)
+                default_v_high = min(255, v_picked + 60) # Slightly more range on the higher side for value
+                if default_v_low > default_v_high: default_v_low = default_v_high
+
+                logger.debug(f"Calculated default S range: ({default_s_low}-{default_s_high}), V range: ({default_v_low}-{default_v_high})")
+
+                if hasattr(self, 'hue_tolerance_slider'): # Check if new sliders are implemented (they are)
+                    # self.hue_tolerance_var is already set above
+                    self.s_min_var.set(default_s_low)
                     self.s_max_var.set(default_s_max)
                     self.v_min_var.set(default_v_min)
                     self.v_max_var.set(default_v_max)
@@ -703,23 +722,33 @@ class App:
 
                         # If we are in contour detection mode (either tracker unavailable or lost)
                         # and a contour was found, draw the green box.
-                        if not self.tracker_initialized or not self.trackers_available:
-                             cv2.rectangle(processed_frame_display, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                        # This current_bbox_for_warp was set from contour.
+                        if (not self.tracker_initialized or not self.trackers_available) and self.current_bbox_for_warp:
+                             cx, cy, cw, ch = [int(v) for v in self.current_bbox_for_warp]
+                             cv2.rectangle(processed_frame_display, (cx, cy), (cx + cw, cy + ch), (0, 255, 0), 2) # Green for contour
 
-            # Perspective Warp Logic (uses self.current_bbox_for_warp)
-            # Also, draw bounding box from tracker if it's active and successful for visual feedback
-            elif self.tracker_initialized and self.current_bbox_for_warp: # current_bbox_for_warp is from tracker
+            # If tracker was initialized and successfully updated, current_bbox_for_warp is from tracker. Draw blue.
+            elif self.tracker_initialized and self.current_bbox_for_warp and used_tracker_for_bbox:
                 xt, yt, wt, ht = [int(v) for v in self.current_bbox_for_warp]
                 cv2.rectangle(processed_frame_display, (xt, yt), (xt + wt, yt + ht), (255, 0, 0), 2) # Blue for tracker box
 
+            # If after all attempts, no bbox, ensure processed_frame_display is just the raw frame.
+            if self.current_bbox_for_warp is None:
+                processed_frame_display = frame.copy() # Ensure it's clean if no bbox
+                logger.debug("No valid bbox for warp, processed display will be raw frame.")
+
+
             if self.current_bbox_for_warp:
-                x, y, w, h = [int(v) for v in self.current_bbox_for_warp]
+                # The x,y,w,h for warp should come from self.current_bbox_for_warp
+                x_warp, y_warp, w_warp, h_warp = [int(v) for v in self.current_bbox_for_warp]
+
                 # Define target points as corners of the bounding box for warp
-                # This is a simplification; ideally, we'd get a better quad from contour or tracker if possible
-                # For CSRT/KCF, they give a bbox. We can use approxPolyDP on a mask from this bbox if needed.
-                # For now, using the bbox directly as the target quad.
+                # This is a simplification.
                 temp_quad_points = np.array([
-                    [x, y], [x + w, y], [x + w, y + h], [x, y + h]
+                    [x_warp, y_warp],
+                    [x_warp + w_warp, y_warp],
+                    [x_warp + w_warp, y_warp + h_warp],
+                    [x_warp, y_warp + h_warp]
                 ], dtype=np.float32)
 
                 # Order points: top-left, top-right, bottom-right, bottom-left
@@ -764,10 +793,22 @@ class App:
             # Display processed frame
             target_processed_w = self.processed_video_label_width - 10 if self.processed_video_label_width > 20 else self.processed_video_label_width
             target_processed_h = self.processed_video_label_height - 10 if self.processed_video_label_height > 20 else self.processed_video_label_height
-            resized_processed_frame = self._resize_frame_keep_aspect_ratio(processed_frame_display, target_processed_w, target_processed_h)
-            img_processed_tk = cv2.cvtColor(resized_processed_frame, cv2.COLOR_BGR2RGB) # Renamed to avoid conflict
-            img_processed_pil = Image.fromarray(img_processed_tk) # Renamed
-            imgtk_processed = ImageTk.PhotoImage(image=img_processed_pil) # Renamed
+
+            display_image_on_processed_label = None
+            if self.show_mask_preview.get():
+                # If show mask is checked, display the mask
+                if 'mask' in locals() and mask is not None: # Ensure mask exists
+                    resized_mask = self._resize_frame_keep_aspect_ratio(mask, target_processed_w, target_processed_h)
+                    display_image_on_processed_label = cv2.cvtColor(resized_mask, cv2.COLOR_GRAY2RGB)
+                else: # Fallback if mask isn't generated for some reason
+                    display_image_on_processed_label = np.zeros((target_processed_h, target_processed_w, 3), dtype=np.uint8) # Black image
+            else:
+                # Otherwise, display the processed_frame_display (with overlays)
+                resized_processed_frame = self._resize_frame_keep_aspect_ratio(processed_frame_display, target_processed_w, target_processed_h)
+                display_image_on_processed_label = cv2.cvtColor(resized_processed_frame, cv2.COLOR_BGR2RGB)
+
+            img_processed_pil = Image.fromarray(display_image_on_processed_label)
+            imgtk_processed = ImageTk.PhotoImage(image=img_processed_pil)
             self.processed_video_label.imgtk = imgtk_processed
             self.processed_video_label.configure(image=imgtk_processed)
         else:
