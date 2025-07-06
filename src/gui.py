@@ -9,8 +9,14 @@ class App:
         self.root = root
         self.root.title("DJ Shirt Visualizer")
 
+        # Initialize core attributes first
         self.cap = None
-        self.logo_image_original = None # Initialize attribute
+        self.logo_image_original = None
+        self.camera_active = False
+        self.after_id_video_loop = None
+        self.is_processing = False
+        self.show_mask_preview = tk.BooleanVar(value=False) # Initialize here
+        self.color_picker_mode = False # Initialize here
 
         # --- Tracking variables ---
         self.tracker = None
@@ -21,9 +27,9 @@ class App:
         self.current_bbox_for_warp = None # Bbox to use for current frame's warp
 
         # --- Video Loop & Processing Flags ---
-        self.camera_active = False  # Flag to control the unified video loop
-        self.after_id_video_loop = None  # To store ID of root.after() call
-        self.is_processing = False # Main flag to enable/disable shirt processing logic
+        # self.camera_active = False  # Moved up
+        # self.after_id_video_loop = None  # Moved up
+        # self.is_processing = False # Moved up
 
         # HSV Color range defaults (e.g., for a shade of green)
         # User will be able to adjust this.
@@ -90,10 +96,8 @@ class App:
         self.start_stop_button.grid(row=1, column=0, sticky="ew", padx=5, pady=10)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.camera_active = False  # Flag to control the unified video loop
-        self.after_id_video_loop = None  # To store ID of root.after() call
-        self.is_processing = False # Ensure this is initialized before _initial_camera_start might use it implicitly
-        self.show_mask_preview = tk.BooleanVar(value=False) # For mask preview checkbox
+        # self.camera_active, self.after_id_video_loop, self.is_processing, self.show_mask_preview
+        # are now initialized at the top of __init__
 
         # Attempt to start initial camera preview
         self._initial_camera_start()
