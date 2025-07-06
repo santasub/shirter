@@ -11,6 +11,7 @@ class App:
 
         self.cap = None
         self.is_processing = False
+        self.logo_image_original = None # Initialize attribute
 
         # HSV Color range defaults (e.g., for a shade of green)
         # User will be able to adjust this.
@@ -332,7 +333,7 @@ class App:
             print("Available cameras:", cameras)
         return cameras
 
-    def _update_hsv_from_sliders(self, event=None):
+    def _update_hsv_from_main_sliders(self, event=None): # Renamed from _update_hsv_from_sliders
         self.lower_hsv[0] = self.hsv_sliders["H_low"].get()
         self.lower_hsv[1] = self.hsv_sliders["S_low"].get()
         self.lower_hsv[2] = self.hsv_sliders["V_low"].get()
@@ -482,9 +483,37 @@ class App:
             filetypes=(("PNG files", "*.png"), ("JPEG files", "*.jpg;*.jpeg"), ("All files", "*.*"))
         )
         if filepath:
-            self.logo_path_var.set(filepath)
-            print(f"Selected logo: {filepath}")
-            # TODO: Load and store the image
+            try:
+                print(f"DEBUG: Attempting to load logo from: {filepath}")
+                # Load the image using Pillow
+                img = Image.open(filepath)
+                img.load() # Force loading the image data
+
+                # Store the original image. We might need to resize/process it later for display or overlay.
+                self.logo_image_original = img
+
+                # For now, just confirm it's loaded.
+                # We could display a small thumbnail in the UI if desired later.
+                self.logo_path_var.set(os.path.basename(filepath)) # Show filename
+                print(f"Successfully loaded logo: {filepath}, format: {img.format}, size: {img.size}, mode: {img.mode}")
+                messagebox.showinfo("Logo Loaded", f"Successfully loaded logo: {os.path.basename(filepath)}")
+
+                # TODO: Trigger a re-render or update if video is processing, to show the logo
+                # This part will be handled when we implement logo rendering on the shirt.
+
+            except FileNotFoundError:
+                messagebox.showerror("Error", f"Logo file not found: {filepath}")
+                self.logo_path_var.set("Error: File not found.")
+                print(f"ERROR: Logo file not found: {filepath}")
+            except UnidentifiedImageError:
+                messagebox.showerror("Error", f"Cannot identify image file. Is it a valid image format (PNG, JPG, etc.)?\nFile: {filepath}")
+                self.logo_path_var.set("Error: Invalid image format.")
+                print(f"ERROR: Cannot identify image file: {filepath}")
+            except Exception as e:
+                messagebox.showerror("Error", f"An error occurred while loading the logo: {e}")
+                self.logo_path_var.set("Error: Could not load logo.")
+                print(f"ERROR: Could not load logo '{filepath}': {e}")
+
 
     def define_roi(self):
         # Placeholder for ROI definition logic
@@ -721,6 +750,7 @@ class App:
 if __name__ == '__main__':
     import os
     import sys # For sys.platform
+    from PIL import UnidentifiedImageError # Explicit import for exception handling
     root = tk.Tk()
     app = App(root)
     # Increased minimum height to better accommodate all control panel widgets
