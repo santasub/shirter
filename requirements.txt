@@ -1,4 +1,4 @@
-opencv-python
+opencv-contrib-python
 numpy
 Pillow
 # Add pyvirtualcam later when we get to that step

@@ -15,6 +15,8 @@ class App:
         # --- Tracking variables ---
         self.tracker = None
         self.tracker_initialized = False
+        self.trackers_available = True # Assume trackers are available until proven otherwise
+        self.tracker_availability_checked = False # To show message only once
         self.last_known_bbox = None # Stores (x,y,w,h) of the last known good position
         self.current_bbox_for_warp = None # Bbox to use for current frame's warp
 
@@ -101,10 +103,10 @@ class App:
 
     def _initial_camera_start(self):
         if self.available_cameras and self.initial_cam_name != "No cameras found":
-            print(f"DEBUG: Attempting initial camera start with: {self.initial_cam_name}")
+            logger.debug(f"Attempting initial camera start with: {self.initial_cam_name}")
             self._start_camera_feed(camera_name=self.initial_cam_name)
         else:
-            print("DEBUG: No cameras available for initial preview or 'No cameras found' selected.")
+            logger.info("No cameras available for initial preview or 'No cameras found' selected.")
             # Ensure UI reflects that no camera is active
             self.raw_video_label.configure(image=self.default_video_img)
             self.raw_video_label.image = self.default_video_img
@@ -121,9 +123,9 @@ class App:
         if self.cap and self.cap.isOpened():
             try:
                 self.cap.release()
-                print("DEBUG: Previous camera released in _start_camera_feed.")
+                logger.debug("Previous camera released in _start_camera_feed.")
             except Exception as e:
-                print(f"DEBUG: Exception releasing previous camera in _start_camera_feed: {e}")
+                logger.error(f"Exception releasing previous camera in _start_camera_feed: {e}", exc_info=args.debug)
         self.cap = None
         self.camera_active = False
 
@@ -160,7 +162,7 @@ class App:
             self.raw_video_label.image = self.default_video_img
             return False
 
-        print(f"DEBUG: Camera {camera_name} (Index {cam_idx}) opened successfully.")
+        logger.info(f"Camera {camera_name} (Index {cam_idx}) opened successfully.")
         self.camera_active = True
         self.camera_dropdown.config(state=tk.DISABLED if self.is_processing else tk.NORMAL) # Disable during processing
         self._update_video_feeds_loop() # Start the unified loop
@@ -169,17 +171,16 @@ class App:
 
     def _on_camera_select(self, selected_camera_name):
         """Called when a new camera is selected from the OptionMenu."""
-        print(f"DEBUG: Camera selected via OptionMenu: {selected_camera_name}")
+        logger.info(f"Camera selected via OptionMenu: {selected_camera_name}")
         if not self.is_processing: # Only switch preview if not actively processing
             self._start_camera_feed(camera_name=selected_camera_name)
         else:
-            # If processing, user needs to stop and restart to change camera.
-            # Or, we could allow dynamic switching, but that's more complex.
-            print("INFO: To change camera, please stop processing first.")
-            # Revert OptionMenu to the currently active camera if different
-            # This requires knowing which camera self.cap is using. For now, just inform.
-            # self.camera_var.set(current_active_camera_name) # TODO if needed
-
+            logger.info("To change camera, please stop processing first. Current selection ignored.")
+            # Attempt to revert OptionMenu to the actual active camera if possible
+            # This is tricky because we don't store the name of the camera self.cap is using.
+            # For now, we'll just log. The user has to stop/start to change processing cam.
+            # A future improvement could be to find the key for self.cap's index in self.available_cameras
+            # and self.camera_var.set() it.
 
     def _populate_camera_color_tab(self, tab_frame):
         # Camera Selection
@@ -187,8 +188,8 @@ class App:
         camera_select_frame.pack(fill="x", expand=False, padx=5, pady=5)
 
         self.camera_var = tk.StringVar()
-        self.available_cameras = self._list_available_cameras()
-        print(f"DEBUG: self.available_cameras after call: {self.available_cameras}")
+        self.available_cameras = self._list_available_cameras() # This already logs
+        # logger.debug(f"self.available_cameras after call: {self.available_cameras}") # Redundant if _list_available_cameras logs
 
         camera_names = list(self.available_cameras.keys())
         self.initial_cam_name = "No cameras found" # Made instance variable for _initial_camera_start
@@ -207,7 +208,11 @@ class App:
         self.camera_dropdown = tk.OptionMenu(camera_select_frame, self.camera_var, *camera_names, command=self._on_camera_select)
         self.camera_dropdown.pack(pady=5, padx=5, fill="x")
         self.camera_dropdown.config(state=cam_dropdown_state)
-        # print is now part of _list_available_cameras or _start_camera_feed
+            logger.debug(f"tk.OptionMenu created: default='{self.initial_cam_name}', options='{camera_names}', state='{cam_dropdown_state}'")
+        except Exception as e:
+            logger.critical(f"Exception during tk.OptionMenu creation: {e}", exc_info=args.debug)
+            self.camera_dropdown = ttk.Label(camera_select_frame, text="tk.OptionMenu failed.")
+            self.camera_dropdown.pack(pady=5, padx=5, fill="x")
 
         # Color Selection (HSV)
         color_frame = ttk.LabelFrame(tab_frame, text="Shirt Color (HSV)")
@@ -334,37 +339,37 @@ class App:
         index = 0
         # Try up to a certain number of indices to avoid infinite loops on some systems
         max_cam_tests = 10
+        logger.debug("Starting camera device listing...")
         while index < max_cam_tests:
-            # For Windows, CAP_DSHOW. For macOS, CAP_AVFOUNDATION. For Linux, default or CAP_V4L2.
             backend = cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_AVFOUNDATION if sys.platform == 'darwin' else cv2.CAP_ANY
+            logger.debug(f"Attempting to open camera index {index} with backend {backend}")
             cap_test = cv2.VideoCapture(index, backend)
             if cap_test.isOpened():
+                logger.info(f"Camera found: Index {index}")
                 cameras[f"Camera {index}"] = index
                 cap_test.release()
             else:
-                # For some systems, if a higher index fails, lower ones might not exist either.
-                # However, it's also possible for indices to be non-contiguous (e.g., 0, 2).
-                # So we continue checking up to max_cam_tests.
-                # If the first few fail, it's unlikely many more will succeed.
-                if index > 3 and not cameras: # Heuristic: if first 4 attempts fail, probably no cams
+                logger.debug(f"Camera index {index} not opened.")
+                if index > 3 and not cameras:
+                    logger.debug("Stopping camera search early (heuristic: first 4 indices failed).")
                     break
-                cap_test.release() # Ensure it's released even if not opened
+                cap_test.release()
             index += 1
 
-        if not cameras and index == max_cam_tests : # If loop finished due to max_cam_tests and no cameras found
-            # This case might indicate a broader issue like no backend support or global permission denial
-            print("No cameras found after checking multiple indices. Ensure camera drivers and permissions are correct.")
-        elif not cameras: # If loop broke early or just no cameras
-            cameras[f"Camera {index}"] = index
-            cap_test.release()
-            index += 1
+        if not cameras and index == max_cam_tests :
+            logger.warning("No cameras found after checking multiple indices. Ensure camera drivers and permissions are correct.")
+        elif not cameras:
+             # This case (index < max_cam_tests but no cameras) seems unlikely with the break logic
+             # but keeping a log just in case.
+            logger.warning(f"No cameras found, loop ended at index {index-1}.")
+
         if not cameras:
-            print("No cameras found!")
+            logger.warning("No cameras detected on system.")
         else:
-            print("Available cameras:", cameras)
+            logger.info(f"Available cameras: {cameras}")
         return cameras
 
-    def _update_hsv_from_main_sliders(self, event=None): # Renamed from _update_hsv_from_sliders
+    def _update_hsv_from_main_sliders(self, event=None):
         self.lower_hsv[0] = self.hsv_sliders["H_low"].get()
         self.lower_hsv[1] = self.hsv_sliders["S_low"].get()
         self.lower_hsv[2] = self.hsv_sliders["V_low"].get()
@@ -445,15 +450,18 @@ class App:
         self.hsv_color_swatch.config(background=hex_color)
 
     def enable_color_picker_mode(self):
-        if not self.is_processing:
-            messagebox.showwarning("Camera Off", "Please start the camera feed first to pick a color.")
+        logger.debug("enable_color_picker_mode called.")
+        if not self.camera_active: # Changed from self.is_processing
+            messagebox.showwarning("Camera Off", "Camera feed is not active. Please ensure a camera is running to pick a color.")
+            logger.warning("Color pick attempt failed: Camera not active.")
             return
         self.color_picker_mode = True
         self.pick_color_button.config(text="Click on Shirt in Raw Feed", state=tk.DISABLED)
         self.raw_video_label.bind("<Button-1>", self._on_raw_video_click)
-        print("Color picker mode enabled. Click on the raw video feed.")
+        logger.info("Color picker mode enabled. Click on the raw video feed.")
 
     def _on_raw_video_click(self, event):
+        logger.debug(f"Raw video clicked at ({event.x}, {event.y}) for color picking.")
         if self.color_picker_mode and hasattr(self, 'current_raw_frame_for_picker'):
             # Coordinates are relative to the label; need to scale if image is resized.
             # For simplicity, assume label displays image at original size for now.
@@ -470,7 +478,7 @@ class App:
                 h_picked = int(hsv_color_numpy[0])
                 s_picked = int(hsv_color_numpy[1])
                 v_picked = int(hsv_color_numpy[2])
-                print(f"Clicked BGR: {bgr_color}, Picked HSV: ({h_picked}, {s_picked}, {v_picked})")
+                logger.info(f"Clicked BGR: {bgr_color}, Picked HSV: ({h_picked}, {s_picked}, {v_picked})")
 
                 # --- Store the picked base color ---
                 self.base_h_picked = h_picked
@@ -500,8 +508,8 @@ class App:
                 # Removed the 'else' block that had the direct old calculation,
                 # as the new sliders are now considered implemented.
 
-                print(f"DEBUG: Base HSV set to: H={self.base_h_picked}, S={self.base_s_picked}, V={self.base_v_picked}")
-                print(f"DEBUG: Tolerance/Range sliders set to: H_tol={self.hue_tolerance_var.get()}, S_range=({self.s_min_var.get()}-{self.s_max_var.get()}), V_range=({self.v_min_var.get()}-{self.v_max_var.get()})")
+                logger.debug(f"Base HSV set to: H={self.base_h_picked}, S={self.base_s_picked}, V={self.base_v_picked}")
+                logger.debug(f"Tolerance/Range sliders set to: H_tol={self.hue_tolerance_var.get()}, S_range=({self.s_min_var.get()}-{self.s_max_var.get()}), V_range=({self.v_min_var.get()}-{self.v_max_var.get()})")
 
             self.color_picker_mode = False
             self.pick_color_button.config(text="Pick Shirt Color (from Preview)", state=tk.NORMAL)
@@ -515,7 +523,7 @@ class App:
         )
         if filepath:
             try:
-                print(f"DEBUG: Attempting to load logo from: {filepath}")
+                logger.debug(f"Attempting to load logo from: {filepath}")
                 # Load the image using Pillow
                 img = Image.open(filepath)
                 img.load() # Force loading the image data
@@ -526,7 +534,7 @@ class App:
                 # For now, just confirm it's loaded.
                 # We could display a small thumbnail in the UI if desired later.
                 self.logo_path_var.set(os.path.basename(filepath)) # Show filename
-                print(f"Successfully loaded logo: {filepath}, format: {img.format}, size: {img.size}, mode: {img.mode}")
+                logger.info(f"Successfully loaded logo: {filepath}, format: {img.format}, size: {img.size}, mode: {img.mode}")
                 messagebox.showinfo("Logo Loaded", f"Successfully loaded logo: {os.path.basename(filepath)}")
 
                 # TODO: Trigger a re-render or update if video is processing, to show the logo
@@ -535,41 +543,40 @@ class App:
             except FileNotFoundError:
                 messagebox.showerror("Error", f"Logo file not found: {filepath}")
                 self.logo_path_var.set("Error: File not found.")
-                print(f"ERROR: Logo file not found: {filepath}")
+                logger.error(f"Logo file not found: {filepath}")
             except UnidentifiedImageError:
                 messagebox.showerror("Error", f"Cannot identify image file. Is it a valid image format (PNG, JPG, etc.)?\nFile: {filepath}")
                 self.logo_path_var.set("Error: Invalid image format.")
-                print(f"ERROR: Cannot identify image file: {filepath}")
+                logger.error(f"Cannot identify image file: {filepath}")
             except Exception as e:
                 messagebox.showerror("Error", f"An error occurred while loading the logo: {e}")
                 self.logo_path_var.set("Error: Could not load logo.")
-                print(f"ERROR: Could not load logo '{filepath}': {e}")
+                logger.error(f"Could not load logo '{filepath}': {e}", exc_info=args.debug)
 
 
     def define_roi(self):
         # Placeholder for ROI definition logic
-        print("ROI definition button clicked. To be implemented.")
+        logger.info("Define ROI button clicked (Not yet implemented).")
         # This will likely involve capturing a frame and drawing on it.
 
     def toggle_processing(self):
+        logger.debug(f"toggle_processing called. Current self.is_processing: {self.is_processing}")
         self.is_processing = not self.is_processing
         if self.is_processing:
-            cam_idx_str = self.camera_var.get()
-            if not self.camera_active: # If camera isn't already running (e.g. from initial preview)
-                if not self._start_camera_feed(): # Try to start it with current selection
-                    self.is_processing = False # Ensure processing flag is off if camera failed
-                    return # _start_camera_feed shows messages
+            logger.info("Attempting to start processing...")
+            # cam_idx_str = self.camera_var.get() # Not needed here, _start_camera_feed uses self.camera_var
+            if not self.camera_active:
+                if not self._start_camera_feed():
+                    self.is_processing = False
+                    logger.warning("Processing start failed because camera could not be started.")
+                    return
 
-            # If camera is active (either from preview or just started)
-            self.is_processing = True
             self.start_stop_button.config(text="Stop Processing")
-            self.camera_dropdown.config(state=tk.DISABLED) # Disable camera selection while processing
+            self.camera_dropdown.config(state=tk.DISABLED)
             self.pick_color_button.config(state=tk.NORMAL)
-            print("Processing Started")
-            # The _update_video_feeds_loop is already running if camera_active is true,
-            # it will pick up the is_processing flag.
-        else: # Stopping processing
-            self.is_processing = False
+            logger.info("Processing Started.")
+        else:
+            logger.info("Stopping processing...")
             self.start_stop_button.config(text="Start Processing")
             self.camera_dropdown.config(state=tk.NORMAL if self.available_cameras and self.initial_cam_name != "No cameras found" else tk.DISABLED)
             self.pick_color_button.config(state="disabled")
@@ -577,7 +584,7 @@ class App:
             if self.color_picker_mode:
                 self.color_picker_mode = False
                 self.raw_video_label.unbind("<Button-1>")
-            print("Processing Stopped")
+            logger.info("Processing Stopped.")
 
             # Reset processed video label to default, raw preview continues via _update_video_feeds_loop
             self.processed_video_label.configure(image=self.default_video_img)
@@ -586,10 +593,10 @@ class App:
 
     def _update_video_feeds_loop(self): # Renamed from _video_loop
         if not self.camera_active or not self.cap or not self.cap.isOpened():
-            # If camera becomes inactive unexpectedly, stop the loop and reset UI
-            print("DEBUG: Camera feed loop stopping as camera is not active or not opened.")
+            if self.camera_active: # Log only if we expected it to be active
+                logger.warning("Camera feed loop stopping: camera is not active or not opened.")
             self.camera_active = False
-            self.is_processing = False # Also stop processing
+            self.is_processing = False
             self.raw_video_label.configure(image=self.default_video_img)
             self.raw_video_label.image = self.default_video_img
             self.processed_video_label.configure(image=self.default_video_img)
@@ -601,7 +608,7 @@ class App:
 
         ret, frame = self.cap.read()
         if not ret:
-            print("Error: Can't receive frame (stream end?).")
+            logger.error("Can't receive frame (stream end?). Attempting to continue loop.")
             self.after_id_video_loop = self.root.after(100, self._update_video_feeds_loop) # Try again shortly
             return
 
@@ -633,13 +640,11 @@ class App:
                 if success:
                     self.last_known_bbox = bbox
                     self.current_bbox_for_warp = bbox
-                    # (x, y, w, h) = [int(v) for v in bbox]
-                    # cv2.rectangle(processed_frame_display, (x, y), (x + w, y + h), (255, 0, 0), 2) # Blue for tracker
+                    logger.debug(f"Tracker updated successfully. New bbox: {bbox}")
                 else:
-                    print("Tracker lost object.")
+                    logger.info("Tracker lost object. Attempting re-detection.")
                     self.tracker_initialized = False
-                    self.tracker = None # Destroy tracker
-                    # Will attempt re-detection via color below
+                    self.tracker = None
 
             if not self.tracker_initialized:
                 # Optional: Morphological operations
@@ -655,20 +660,56 @@ class App:
                         self.current_bbox_for_warp = (x,y,w,h)
                         self.last_known_bbox = (x,y,w,h)
 
-                        # Initialize tracker
-                        try:
-                            # self.tracker = cv2.TrackerKCF_create() # Faster, less accurate
-                            self.tracker = cv2.TrackerCSRT_create() # Slower, more accurate
-                            self.tracker.init(frame, self.last_known_bbox)
-                            self.tracker_initialized = True
-                            print(f"Tracker initialized with bbox: {self.last_known_bbox}")
-                        except Exception as e:
-                            print(f"Error initializing tracker: {e}")
-                            self.tracker = None
-                            self.tracker_initialized = False
-                        # cv2.rectangle(processed_frame_display, (x, y), (x + w, y + h), (0, 255, 0), 2) # Green for detection
+                        # Initialize tracker only if available
+                        if self.trackers_available:
+                            try:
+                                if not self.tracker_availability_checked: # Check only once
+                                    # Attempt to create a tracker to see if the module is fully available
+                                    # This is a bit of a canary test.
+                                    logger.debug("Performing canary test for cv2.TrackerCSRT_create()")
+                                    test_tracker = cv2.TrackerCSRT_create()
+                                    del test_tracker
+                                    logger.debug("cv2.TrackerCSRT_create() canary test successful.")
+                                    self.tracker_availability_checked = True # Mark as checked
+
+                                # self.tracker = cv2.TrackerKCF_create()
+                                self.tracker = cv2.TrackerCSRT_create()
+                                self.tracker.init(frame, self.last_known_bbox)
+                                self.tracker_initialized = True
+                                logger.info(f"Tracker initialized with bbox: {self.last_known_bbox}")
+                            except AttributeError:
+                                if not self.tracker_availability_checked: # Show warning and log error only once
+                                    messagebox.showwarning("Tracker Error",
+                                                           "OpenCV trackers (e.g., CSRT) seem unavailable in this OpenCV build.\n"
+                                                           "Please install 'opencv-contrib-python' for tracking features:\n"
+                                                           "pip uninstall opencv-python\n"
+                                                           "pip install opencv-contrib-python\n\n"
+                                                           "Falling back to contour-only detection.")
+                                    logger.error("cv2.TrackerCSRT_create() not found. Install opencv-contrib-python. Tracking disabled.", exc_info=args.debug)
+                                    self.trackers_available = False
+                                self.tracker_availability_checked = True # Mark as checked after first attempt
+                                self.tracker = None
+                                self.tracker_initialized = False
+                            except Exception as e:
+                                logger.error(f"Error initializing tracker: {e}", exc_info=args.debug)
+                                self.tracker = None
+                                self.tracker_initialized = False
+                        else:
+                            if not self.tracker_availability_checked: # Log once that trackers are disabled
+                                logger.info("Trackers are marked as unavailable. Using contour-only detection.")
+                                self.tracker_availability_checked = True # Prevent this message from repeating
+
+                        # If we are in contour detection mode (either tracker unavailable or lost)
+                        # and a contour was found, draw the green box.
+                        if not self.tracker_initialized or not self.trackers_available:
+                             cv2.rectangle(processed_frame_display, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
             # Perspective Warp Logic (uses self.current_bbox_for_warp)
+            # Also, draw bounding box from tracker if it's active and successful for visual feedback
+            elif self.tracker_initialized and self.current_bbox_for_warp: # current_bbox_for_warp is from tracker
+                xt, yt, wt, ht = [int(v) for v in self.current_bbox_for_warp]
+                cv2.rectangle(processed_frame_display, (xt, yt), (xt + wt, yt + ht), (255, 0, 0), 2) # Blue for tracker box
+
             if self.current_bbox_for_warp:
                 x, y, w, h = [int(v) for v in self.current_bbox_for_warp]
                 # Define target points as corners of the bounding box for warp
@@ -715,7 +756,7 @@ class App:
                     processed_frame_display = cv2.bitwise_and(processed_frame_display, processed_frame_display, mask=cv2.bitwise_not(mask_for_blending))
                     processed_frame_display = cv2.bitwise_or(processed_frame_display, warped_text_texture, mask=mask_for_blending)
                 else:
-                    print("DEBUG: Invalid points for perspective transform.")
+                    logger.warning("Invalid points for perspective transform. Skipping warp.")
             # --- End Processing Logic ---
 
             # Display processed frame
@@ -738,20 +779,20 @@ class App:
             self.after_id_video_loop = self.root.after(15, self._update_video_feeds_loop)
 
     def on_closing(self):
-        print("DEBUG: Closing application...")
+        logger.info("Closing application...")
         self.camera_active = False # Signal loop to stop
         self.is_processing = False
         if self.after_id_video_loop:
             self.root.after_cancel(self.after_id_video_loop)
             self.after_id_video_loop = None
-            print("DEBUG: Video loop canceled via after_cancel.")
+            logger.debug("Video loop canceled via after_cancel.")
 
         if self.cap and self.cap.isOpened():
             try:
                 self.cap.release()
-                print("DEBUG: Camera released in on_closing.")
+                logger.info("Camera released in on_closing.")
             except Exception as e:
-                print(f"DEBUG: Exception during camera release in on_closing: {e}")
+                logger.error(f"Exception during camera release in on_closing: {e}", exc_info=args.debug)
             finally:
                 self.cap = None
         self.root.destroy()
@@ -802,9 +843,29 @@ class App:
 if __name__ == '__main__':
     import os
     import sys # For sys.platform
+    import argparse
+    import logging
     from PIL import UnidentifiedImageError # Explicit import for exception handling
+
+    # --- Argument Parsing ---
+    parser = argparse.ArgumentParser(description="DJ Shirt Visualizer")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging output.")
+    args = parser.parse_args()
+
+    # --- Logging Setup ---
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(level=log_level,
+                        format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S')
+    logger = logging.getLogger(__name__)
+
+    logger.info("Application starting...")
+    if args.debug:
+        logger.info("Debug mode enabled.")
+
     root = tk.Tk()
-    app = App(root)
+    app = App(root) # Pass logger to app if needed, or use global logger
     # Increased minimum height to better accommodate all control panel widgets
     root.minsize(900, 750)
     root.mainloop()
+    logger.info("Application finished.")
