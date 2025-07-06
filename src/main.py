@@ -3,21 +3,26 @@ import numpy as np
 
 def list_available_cameras():
     """Lists available camera devices and their indices."""
+    cameras = {}
     index = 0
-    arr = []
-    while True:
-        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW) # Use CAP_DSHOW for Windows, can be different for other OS
-        if not cap.isOpened():
-            cap.release()
-            break
-        arr.append(index)
-        cap.release()
+    max_cam_tests = 10 # Limit probing
+    while index < max_cam_tests:
+        backend = cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_AVFOUNDATION if sys.platform == 'darwin' else cv2.CAP_ANY
+        cap_test = cv2.VideoCapture(index, backend)
+        if cap_test.isOpened():
+            cameras[f"Camera {index}"] = index
+            cap_test.release()
+        else:
+            if index > 3 and not cameras: # Heuristic break
+                break
+            cap_test.release()
         index += 1
-    if not arr:
+
+    if not cameras:
         print("No cameras found!")
     else:
-        print("Available camera indices:", arr)
-    return arr
+        print("Available cameras:", cameras)
+    return list(cameras.values()) # Return a list of indices, similar to original 'arr'
 
 def main(camera_index=0):
     """
@@ -25,10 +30,14 @@ def main(camera_index=0):
     Press 'q' to quit.
     """
     print(f"Attempting to use camera index: {camera_index}")
-    cap = cv2.VideoCapture(camera_index)
+    backend = cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_AVFOUNDATION if sys.platform == 'darwin' else cv2.CAP_ANY
+    cap = cv2.VideoCapture(camera_index, backend)
 
     if not cap.isOpened():
-        print(f"Error: Could not open video device with index {camera_index}.")
+        error_message = f"Error: Could not open video device with index {camera_index} using backend {backend}."
+        if sys.platform == 'darwin':
+            error_message += "\nPlease ensure the application has permission to access the camera. Check System Settings > Privacy & Security > Camera."
+        print(error_message)
         print("If you have other cameras, try changing the camera_index.")
         print("Available cameras will be listed if any are found.")
         list_available_cameras()
@@ -184,11 +193,16 @@ def main(camera_index=0):
 
 
 if __name__ == '__main__':
+    import os # For os.name
+    import sys # For sys.platform
     # We'll need numpy for morphological operations if we add them
     # import numpy as np # Moved to top if used globally or keep here for main-only
-    available_cameras = list_available_cameras()
+
+    # list_available_cameras now returns a list of indices
+    available_camera_indices = list_available_cameras()
     selected_camera_index = 0 # Default to 0
-    if not available_cameras:
+
+    if not available_camera_indices:
         print("Exiting as no cameras are available.")
     else:
         # Simple way to select camera if multiple are available

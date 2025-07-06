@@ -11,7 +11,6 @@ class App:
 
         self.cap = None
         self.is_processing = False
-        self.available_cameras = self._list_available_cameras()
 
         # HSV Color range defaults (e.g., for a shade of green)
         # User will be able to adjust this.
@@ -47,19 +46,30 @@ class App:
         camera_select_frame.pack(fill="x", expand=False, padx=5, pady=5) # expand=False
 
         self.camera_var = tk.StringVar()
-        if not self.available_cameras:
-            self.available_cameras = {"No cameras found": -1}
-            self.camera_var.set("No cameras found")
-            cam_dropdown_state = "disabled"
-        else:
-            self.camera_var.set(next(iter(self.available_cameras))) # First camera name
-            cam_dropdown_state = "readonly"
+        self.available_cameras = self._list_available_cameras() # Populate here, before GUI elements use it
 
+        camera_names = list(self.available_cameras.keys())
+        initial_cam_name = ""
+        cam_dropdown_state = "disabled"
+
+        if camera_names:
+            initial_cam_name = camera_names[0]
+            cam_dropdown_state = "readonly"
+        else:
+            # If no cameras, add a dummy entry for display and keep disabled
+            camera_names = ["No cameras found"]
+            initial_cam_name = camera_names[0]
+            # self.available_cameras will remain empty or be {'No cameras found': -1} from _list_available_cameras
+            # Ensure self.available_cameras has this key if we rely on it later for index
+            if not self.available_cameras: # If _list_available_cameras returned truly empty
+                 self.available_cameras[initial_cam_name] = -1
+
+
+        self.camera_var.set(initial_cam_name)
         self.camera_dropdown = ttk.OptionMenu(camera_select_frame, self.camera_var,
-                                              self.camera_var.get(), *self.available_cameras.keys())
+                                              initial_cam_name, *camera_names) # Pass initial_cam_name as the default
         self.camera_dropdown.pack(pady=5, padx=5, fill="x")
         self.camera_dropdown.config(state=cam_dropdown_state)
-
 
         # Color Selection (HSV)
         self.color_frame = ttk.LabelFrame(self.control_frame, text="Shirt Color (HSV)")
@@ -117,12 +127,29 @@ class App:
         """Lists available camera devices and their indices."""
         cameras = {}
         index = 0
-        while True:
-            # For Windows, CAP_DSHOW can be more reliable. For others, default is fine.
-            cap_test = cv2.VideoCapture(index, cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_ANY)
-            if not cap_test.isOpened():
+        # Try up to a certain number of indices to avoid infinite loops on some systems
+        max_cam_tests = 10
+        while index < max_cam_tests:
+            # For Windows, CAP_DSHOW. For macOS, CAP_AVFOUNDATION. For Linux, default or CAP_V4L2.
+            backend = cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_AVFOUNDATION if sys.platform == 'darwin' else cv2.CAP_ANY
+            cap_test = cv2.VideoCapture(index, backend)
+            if cap_test.isOpened():
+                cameras[f"Camera {index}"] = index
                 cap_test.release()
-                break
+            else:
+                # For some systems, if a higher index fails, lower ones might not exist either.
+                # However, it's also possible for indices to be non-contiguous (e.g., 0, 2).
+                # So we continue checking up to max_cam_tests.
+                # If the first few fail, it's unlikely many more will succeed.
+                if index > 3 and not cameras: # Heuristic: if first 4 attempts fail, probably no cams
+                    break
+                cap_test.release() # Ensure it's released even if not opened
+            index += 1
+
+        if not cameras and index == max_cam_tests : # If loop finished due to max_cam_tests and no cameras found
+            # This case might indicate a broader issue like no backend support or global permission denial
+            print("No cameras found after checking multiple indices. Ensure camera drivers and permissions are correct.")
+        elif not cameras: # If loop broke early or just no cameras
             cameras[f"Camera {index}"] = index
             cap_test.release()
             index += 1
@@ -233,13 +260,18 @@ class App:
 
             cam_idx = self.available_cameras[cam_idx_str]
             if cam_idx == -1:
-                messagebox.showerror("Error", "Invalid camera selected.")
+                messagebox.showerror("Error", "Invalid camera selected. Please ensure 'No cameras found' is not selected if cameras are available.")
                 self.is_processing = False
                 return
 
-            self.cap = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_ANY)
+            backend = cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_AVFOUNDATION if sys.platform == 'darwin' else cv2.CAP_ANY
+            self.cap = cv2.VideoCapture(cam_idx, backend)
+
             if not self.cap.isOpened():
-                messagebox.showerror("Error", f"Could not open camera {cam_idx}.")
+                error_message = f"Could not open camera {cam_idx}."
+                if sys.platform == 'darwin':
+                    error_message += "\nPlease ensure the application has permission to access the camera. Check System Settings > Privacy & Security > Camera."
+                messagebox.showerror("Error", error_message)
                 self.is_processing = False
                 self.cap = None
                 return
@@ -428,7 +460,8 @@ class App:
     #     self.root.mainloop()
 
 if __name__ == '__main__':
-    import os # For CAP_DSHOW check
+    import os
+    import sys # For sys.platform
     root = tk.Tk()
     app = App(root)
     root.minsize(900, 700)
