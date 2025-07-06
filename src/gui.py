@@ -208,7 +208,7 @@ class App:
         self.camera_dropdown = tk.OptionMenu(camera_select_frame, self.camera_var, *camera_names, command=self._on_camera_select)
         self.camera_dropdown.pack(pady=5, padx=5, fill="x")
         self.camera_dropdown.config(state=cam_dropdown_state)
-            logger.debug(f"tk.OptionMenu created: default='{self.initial_cam_name}', options='{camera_names}', state='{cam_dropdown_state}'")
+        logger.debug(f"tk.OptionMenu created: default='{self.initial_cam_name}', options='{camera_names}', state='{cam_dropdown_state}'")
         except Exception as e:
             logger.critical(f"Exception during tk.OptionMenu creation: {e}", exc_info=args.debug)
             self.camera_dropdown = ttk.Label(camera_select_frame, text="tk.OptionMenu failed.")
