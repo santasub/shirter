@@ -1,6 +1,6 @@
 numpy
 Pillow
-ultralytics
+ultralytics==8.0.150
 torch
 torchvision
 opencv-python
