@@ -1,5 +1,6 @@
 opencv-contrib-python
 numpy
 Pillow
+ultralytics
 # Add pyvirtualcam later when we get to that step
 # Add GUI framework (e.g., PyQt5 or Tkinter) later

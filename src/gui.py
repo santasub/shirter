@@ -3,6 +3,7 @@ from tkinter import ttk, colorchooser, filedialog, messagebox
 from PIL import Image, ImageTk
 import cv2
 import numpy as np
+from ultralytics import YOLO
 
 class App:
     def __init__(self, root):
@@ -18,24 +19,16 @@ class App:
         self.show_mask_preview = tk.BooleanVar(value=False) # Initialize here
         self.color_picker_mode = False # Initialize here
 
-        # --- Tracking variables ---
-        self.tracker = None
-        self.tracker_initialized = False
-        self.trackers_available = True # Assume trackers are available until proven otherwise
-        self.tracker_availability_checked = False # To show message only once
+        # --- Person Tracking variables ---
+        self.model = YOLO("yolov8n-pose.pt")
         self.last_known_bbox = None # Stores (x,y,w,h) of the last known good position
         self.current_bbox_for_warp = None # Bbox to use for current frame's warp
-
-        # --- Video Loop & Processing Flags ---
-        # self.camera_active = False  # Moved up
-        # self.after_id_video_loop = None  # Moved up
-        # self.is_processing = False # Moved up
-
-        # HSV Color range defaults (e.g., for a shade of green)
-        # User will be able to adjust this.
-        self.lower_hsv = np.array([35, 100, 100]) # Increased min S and V
-        self.upper_hsv = np.array([85, 255, 255])
-        self.hsv_color_display = None # For showing selected color swatch
+        self.keypoint_names = [
+            "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+            "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+            "left_wrist", "right_wrist", "left_hip", "right_hip",
+            "left_knee", "right_knee", "left_ankle", "right_ankle"
+        ]
 
         # --- Main PanedWindow Setup ---
         self.main_paned_window = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=5)
@@ -43,17 +36,14 @@ class App:
 
         # --- Video Frame (Left Pane) ---
         self.video_frame = ttk.Frame(self.main_paned_window, padding="5")
-        # self.video_frame.pack(fill=tk.BOTH, expand=True) # pack/grid is handled by add
         self.main_paned_window.add(self.video_frame, stretch="always", minsize=300) # stretch="always"
 
         # --- Control Frame (Right Pane) ---
-        # This is the main container for controls, will be added to the PanedWindow
         self.control_panel_outer_frame = ttk.Frame(self.main_paned_window, padding="5")
-        self.main_paned_window.add(self.control_panel_outer_frame, stretch="never", minsize=300) # Increased minsize a bit
+        self.main_paned_window.add(self.control_panel_outer_frame, stretch="never", minsize=300)
 
-        # Configure grid for the control_panel_outer_frame to hold Notebook and Start/Stop button
-        self.control_panel_outer_frame.grid_rowconfigure(0, weight=1) # Notebook will expand
-        self.control_panel_outer_frame.grid_rowconfigure(1, weight=0) # Button fixed at bottom
+        self.control_panel_outer_frame.grid_rowconfigure(0, weight=1)
+        self.control_panel_outer_frame.grid_rowconfigure(1, weight=0)
         self.control_panel_outer_frame.grid_columnconfigure(0, weight=1)
 
         # Create the Notebook (Tabs)
@@ -61,34 +51,26 @@ class App:
         self.notebook.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
 
         # Create frames for each tab
-        self.tab_camera_color = ttk.Frame(self.notebook, padding="5")
+        self.tab_camera = ttk.Frame(self.notebook, padding="5")
         self.tab_overlays = ttk.Frame(self.notebook, padding="5")
 
-        self.notebook.add(self.tab_camera_color, text='Camera & Color')
+        self.notebook.add(self.tab_camera, text='Camera')
         self.notebook.add(self.tab_overlays, text='Overlays')
 
         # --- Video Display Area (within self.video_frame) ---
-        # Set a default size for video labels to prevent collapsing
         self.default_video_bg = Image.new('RGB', (640, 480), (100, 100, 100))
         self.default_video_img = ImageTk.PhotoImage(self.default_video_bg)
 
-        self.raw_video_label = ttk.Label(self.video_frame, image=self.default_video_img)
-        self.raw_video_label.pack(pady=5, padx=5, expand=True, fill="both") # fill and expand within video_frame
+        self.video_label = ttk.Label(self.video_frame, image=self.default_video_img)
+        self.video_label.pack(pady=5, padx=5, expand=True, fill="both")
 
-        self.processed_video_label = ttk.Label(self.video_frame, image=self.default_video_img)
-        self.processed_video_label.pack(pady=5, padx=5, expand=True, fill="both") # fill and expand within video_frame
+        self.video_label_width = self.default_video_bg.width
+        self.video_label_height = self.default_video_bg.height
 
-        # Store current dimensions of video labels for resizing
-        self.raw_video_label_width = self.default_video_bg.width
-        self.raw_video_label_height = self.default_video_bg.height
-        self.processed_video_label_width = self.default_video_bg.width
-        self.processed_video_label_height = self.default_video_bg.height
-
-        self.raw_video_label.bind("<Configure>", self._on_raw_video_resize)
-        self.processed_video_label.bind("<Configure>", self._on_processed_video_resize)
+        self.video_label.bind("<Configure>", self._on_video_resize)
 
         # --- Populate Tabs ---
-        self._populate_camera_color_tab(self.tab_camera_color)
+        self._populate_camera_tab(self.tab_camera)
         self._populate_overlays_tab(self.tab_overlays)
 
         # Start/Stop Button (Now part of control_panel_outer_frame, below the notebook)
@@ -112,13 +94,9 @@ class App:
             self._start_camera_feed(camera_name=self.initial_cam_name)
         else:
             logger.info("No cameras available for initial preview or 'No cameras found' selected.")
-            # Ensure UI reflects that no camera is active
-            self.raw_video_label.configure(image=self.default_video_img)
-            self.raw_video_label.image = self.default_video_img
-            self.processed_video_label.configure(image=self.default_video_img)
-            self.processed_video_label.image = self.default_video_img
+            self.video_label.configure(image=self.default_video_img)
+            self.video_label.image = self.default_video_img
             self.camera_dropdown.config(state=tk.DISABLED)
-
 
     def _start_camera_feed(self, camera_name=None):
         if self.after_id_video_loop:
@@ -134,19 +112,17 @@ class App:
         self.cap = None
         self.camera_active = False
 
-        if camera_name is None: # If called from toggle_processing without a specific camera
+        if camera_name is None:
             camera_name = self.camera_var.get()
 
         if not camera_name or camera_name == "No cameras found":
             messagebox.showerror("Error", "No camera selected or available.")
-            self.raw_video_label.configure(image=self.default_video_img) # Reset preview
-            self.raw_video_label.image = self.default_video_img
-            self.processed_video_label.configure(image=self.default_video_img)
-            self.processed_video_label.image = self.default_video_img
+            self.video_label.configure(image=self.default_video_img) # Reset preview
+            self.video_label.image = self.default_video_img
             self.camera_dropdown.config(state=tk.DISABLED if not self.available_cameras else tk.NORMAL)
             self.start_stop_button.config(text="Start Processing")
-            self.is_processing = False # Ensure processing is marked as off
-            return False # Indicate failure
+            self.is_processing = False
+            return False
 
         cam_idx = self.available_cameras.get(camera_name, -1)
         if cam_idx == -1:
@@ -163,41 +139,34 @@ class App:
             messagebox.showerror("Error", error_message)
             self.cap = None
             self.camera_active = False
-            self.raw_video_label.configure(image=self.default_video_img) # Reset preview
-            self.raw_video_label.image = self.default_video_img
+            self.video_label.configure(image=self.default_video_img) # Reset preview
+            self.video_label.image = self.default_video_img
             return False
 
         logger.info(f"Camera {camera_name} (Index {cam_idx}) opened successfully.")
         self.camera_active = True
-        self.camera_dropdown.config(state=tk.DISABLED if self.is_processing else tk.NORMAL) # Disable during processing
-        self._update_video_feeds_loop() # Start the unified loop
+        self.camera_dropdown.config(state=tk.DISABLED if self.is_processing else tk.NORMAL)
+        self._update_video_feeds_loop()
         return True
-
 
     def _on_camera_select(self, selected_camera_name):
         """Called when a new camera is selected from the OptionMenu."""
         logger.info(f"Camera selected via OptionMenu: {selected_camera_name}")
-        if not self.is_processing: # Only switch preview if not actively processing
+        if not self.is_processing:
             self._start_camera_feed(camera_name=selected_camera_name)
         else:
             logger.info("To change camera, please stop processing first. Current selection ignored.")
-            # Attempt to revert OptionMenu to the actual active camera if possible
-            # This is tricky because we don't store the name of the camera self.cap is using.
-            # For now, we'll just log. The user has to stop/start to change processing cam.
-            # A future improvement could be to find the key for self.cap's index in self.available_cameras
-            # and self.camera_var.set() it.
 
-    def _populate_camera_color_tab(self, tab_frame):
+    def _populate_camera_tab(self, tab_frame):
         # Camera Selection
         camera_select_frame = ttk.LabelFrame(tab_frame, text="Camera Setup")
         camera_select_frame.pack(fill="x", expand=False, padx=5, pady=5)
 
         self.camera_var = tk.StringVar()
-        self.available_cameras = self._list_available_cameras() # This already logs
-        # logger.debug(f"self.available_cameras after call: {self.available_cameras}") # Redundant if _list_available_cameras logs
+        self.available_cameras = self._list_available_cameras()
 
         camera_names = list(self.available_cameras.keys())
-        self.initial_cam_name = "No cameras found" # Made instance variable for _initial_camera_start
+        self.initial_cam_name = "No cameras found"
         cam_dropdown_state = tk.DISABLED
 
         if camera_names:
@@ -205,89 +174,19 @@ class App:
             cam_dropdown_state = tk.NORMAL
         else:
             camera_names = [self.initial_cam_name]
-            if self.initial_cam_name not in self.available_cameras: # Should be caught by _list_available_cameras
-                 self.available_cameras[self.initial_cam_name] = -1 # Ensure it exists if no cams found
+            if self.initial_cam_name not in self.available_cameras:
+                 self.available_cameras[self.initial_cam_name] = -1
 
         self.camera_var.set(self.initial_cam_name)
-        # Add command to OptionMenu to handle camera changes
         try:
-            # self.camera_var.set(self.initial_cam_name) # Already set above
             self.camera_dropdown = tk.OptionMenu(camera_select_frame, self.camera_var, *camera_names, command=self._on_camera_select)
             self.camera_dropdown.pack(pady=5, padx=5, fill="x")
-            self.camera_dropdown.config(state=cam_dropdown_state) # cam_dropdown_state is tk.NORMAL or tk.DISABLED
-            logger.debug(f"tk.OptionMenu created: default='{self.initial_cam_name}', options='{camera_names}', state='{self.camera_dropdown['state']}'") # Log actual state
+            self.camera_dropdown.config(state=cam_dropdown_state)
+            logger.debug(f"tk.OptionMenu created: default='{self.initial_cam_name}', options='{camera_names}', state='{self.camera_dropdown['state']}'")
         except Exception as e:
-            logger.critical(f"Exception during tk.OptionMenu creation: {e}", exc_info=args.debug) # Log with exc_info for debug
+            logger.critical(f"Exception during tk.OptionMenu creation: {e}", exc_info=args.debug)
             self.camera_dropdown = ttk.Label(camera_select_frame, text="tk.OptionMenu failed.")
             self.camera_dropdown.pack(pady=5, padx=5, fill="x")
-
-        # Color Selection (HSV)
-        color_frame = ttk.LabelFrame(tab_frame, text="Shirt Color (HSV)")
-        color_frame.pack(fill="x", expand=False, padx=5, pady=5)
-
-        self.pick_color_button = ttk.Button(color_frame, text="Pick Shirt Color (from Preview)", command=self.enable_color_picker_mode)
-        self.pick_color_button.pack(pady=2)
-        self.color_picker_mode = False
-
-        self.hsv_color_display_label = ttk.Label(color_frame, text="Selected Color:")
-        self.hsv_color_display_label.pack(pady=2)
-        self.hsv_color_swatch = tk.Label(color_frame, background="grey", width=10, height=2)
-        self.hsv_color_swatch.pack(pady=2)
-        self._update_color_swatch(self.lower_hsv, self.upper_hsv)
-
-        # Checkbox for showing mask
-        self.show_mask_checkbox = ttk.Checkbutton(color_frame, text="Show Segmentation Mask", variable=self.show_mask_preview)
-        self.show_mask_checkbox.pack(pady=(5,2))
-
-        ttk.Label(color_frame, text="Picked Color Tolerances:").pack(pady=(5,0))
-        self.hue_tolerance_var = tk.IntVar(value=10)
-        self.base_h_picked = -1
-        hue_tolerance_slider_frame = ttk.Frame(color_frame)
-        hue_tolerance_slider_frame.pack(fill="x", expand=True)
-        ttk.Label(hue_tolerance_slider_frame, text="H Tol:").pack(side=tk.LEFT, padx=2)
-        self.hue_tolerance_slider = tk.Scale(hue_tolerance_slider_frame, from_=0, to=30, orient=tk.HORIZONTAL, variable=self.hue_tolerance_var, command=self._update_hsv_from_tolerance_sliders, length=150)
-        self.hue_tolerance_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
-
-        self.s_min_var = tk.IntVar(value=50)
-        self.s_max_var = tk.IntVar(value=255)
-        self.base_s_picked = -1
-        s_range_frame = ttk.Frame(color_frame)
-        s_range_frame.pack(fill="x", expand=True, pady=2)
-        ttk.Label(s_range_frame, text="S Min:").pack(side=tk.LEFT, padx=2)
-        self.s_min_slider = tk.Scale(s_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.s_min_var, command=self._update_hsv_from_tolerance_sliders, length=150)
-        self.s_min_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
-        ttk.Label(s_range_frame, text="S Max:").pack(side=tk.LEFT, padx=2)
-        self.s_max_slider = tk.Scale(s_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.s_max_var, command=self._update_hsv_from_tolerance_sliders, length=150)
-        self.s_max_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
-
-        self.v_min_var = tk.IntVar(value=50)
-        self.v_max_var = tk.IntVar(value=255)
-        self.base_v_picked = -1
-        v_range_frame = ttk.Frame(color_frame)
-        v_range_frame.pack(fill="x", expand=True, pady=2)
-        ttk.Label(v_range_frame, text="V Min:").pack(side=tk.LEFT, padx=2)
-        self.v_min_slider = tk.Scale(v_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.v_min_var, command=self._update_hsv_from_tolerance_sliders, length=150)
-        self.v_min_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
-        ttk.Label(v_range_frame, text="V Max:").pack(side=tk.LEFT, padx=2)
-        self.v_max_slider = tk.Scale(v_range_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.v_max_var, command=self._update_hsv_from_tolerance_sliders, length=150)
-        self.v_max_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=2)
-
-        ttk.Label(color_frame, text="Resulting HSV Range:").pack(pady=(5,0))
-        hsv_sliders_frame = ttk.Frame(color_frame)
-        hsv_sliders_frame.pack(fill="x", expand=True)
-        self.hsv_sliders = {}
-        for i, label in enumerate(["H_low", "S_low", "V_low", "H_high", "S_high", "V_high"]):
-            val = self.lower_hsv[i % 3] if "low" in label else self.upper_hsv[i % 3]
-            max_val = 179 if "H_" in label else 255
-            scale = tk.Scale(hsv_sliders_frame, from_=0, to=max_val, orient=tk.HORIZONTAL, label=label, length=200, command=self._update_hsv_from_main_sliders)
-            scale.set(val)
-            scale.pack(fill="x", padx=2)
-            self.hsv_sliders[label] = scale
-
-        if self.base_h_picked == -1: self.base_h_picked = (self.lower_hsv[0] + self.upper_hsv[0]) // 2
-        if self.base_s_picked == -1: self.base_s_picked = 128
-        if self.base_v_picked == -1: self.base_v_picked = 128
-        self._update_hsv_from_tolerance_sliders()
 
     def _populate_overlays_tab(self, tab_frame):
         # Text Overlay
@@ -304,19 +203,17 @@ class App:
         self.logo_path_var = tk.StringVar(value="No logo selected.")
         ttk.Label(logo_overlay_frame, textvariable=self.logo_path_var, wraplength=180).pack(pady=2, padx=5, fill="x")
 
-        # ROI Definition (Placeholder)
-        roi_frame = ttk.LabelFrame(tab_frame, text="Overlay Regions (ROI)")
-        roi_frame.pack(fill="x", expand=False, padx=5, pady=5)
-        ttk.Button(roi_frame, text="Define Shirt Regions", command=self.define_roi, state=tk.DISABLED).pack(pady=5)
+        # Keypoint Selection
+        keypoint_frame = ttk.LabelFrame(tab_frame, text="Overlay Attachment")
+        keypoint_frame.pack(fill="x", expand=False, padx=5, pady=5)
+        self.keypoint_var = tk.StringVar(value=self.keypoint_names[0])
+        self.keypoint_dropdown = tk.OptionMenu(keypoint_frame, self.keypoint_var, *self.keypoint_names)
+        self.keypoint_dropdown.pack(pady=5, padx=5, fill="x")
 
 
-    def _on_raw_video_resize(self, event):
-        self.raw_video_label_width = event.width
-        self.raw_video_label_height = event.height
-
-    def _on_processed_video_resize(self, event):
-        self.processed_video_label_width = event.width
-        self.processed_video_label_height = event.height
+    def _on_video_resize(self, event):
+        self.video_label_width = event.width
+        self.video_label_height = event.height
 
     def _resize_frame_keep_aspect_ratio(self, frame, target_width, target_height):
         if target_width <= 0 or target_height <= 0: # Avoid division by zero or invalid sizes
@@ -604,28 +501,16 @@ class App:
             logger.info("Stopping processing...")
             self.start_stop_button.config(text="Start Processing")
             self.camera_dropdown.config(state=tk.NORMAL if self.available_cameras and self.initial_cam_name != "No cameras found" else tk.DISABLED)
-            self.pick_color_button.config(state="disabled")
-
-            if self.color_picker_mode:
-                self.color_picker_mode = False
-                self.raw_video_label.unbind("<Button-1>")
             logger.info("Processing Stopped.")
 
-            # Reset processed video label to default, raw preview continues via _update_video_feeds_loop
-            self.processed_video_label.configure(image=self.default_video_img)
-            self.processed_video_label.image = self.default_video_img
-
-
-    def _update_video_feeds_loop(self): # Renamed from _video_loop
+    def _update_video_feeds_loop(self):
         if not self.camera_active or not self.cap or not self.cap.isOpened():
-            if self.camera_active: # Log only if we expected it to be active
+            if self.camera_active:
                 logger.warning("Camera feed loop stopping: camera is not active or not opened.")
             self.camera_active = False
             self.is_processing = False
-            self.raw_video_label.configure(image=self.default_video_img)
-            self.raw_video_label.image = self.default_video_img
-            self.processed_video_label.configure(image=self.default_video_img)
-            self.processed_video_label.image = self.default_video_img
+            self.video_label.configure(image=self.default_video_img)
+            self.video_label.image = self.default_video_img
             self.start_stop_button.config(text="Start Processing")
             is_cam_available = bool(self.available_cameras and self.initial_cam_name != "No cameras found")
             self.camera_dropdown.config(state=tk.NORMAL if is_cam_available else tk.DISABLED)
@@ -634,128 +519,29 @@ class App:
         ret, frame = self.cap.read()
         if not ret:
             logger.error("Can't receive frame (stream end?). Attempting to continue loop.")
-            self.after_id_video_loop = self.root.after(100, self._update_video_feeds_loop) # Try again shortly
+            self.after_id_video_loop = self.root.after(100, self._update_video_feeds_loop)
             return
 
-        # Always display raw frame
-        self.current_raw_frame_for_picker = frame.copy() # For color picker
-
-        target_raw_w = self.raw_video_label_width - 10 if self.raw_video_label_width > 20 else self.raw_video_label_width
-        target_raw_h = self.raw_video_label_height - 10 if self.raw_video_label_height > 20 else self.raw_video_label_height
-        resized_raw_frame = self._resize_frame_keep_aspect_ratio(frame, target_raw_w, target_raw_h)
-        img_raw = cv2.cvtColor(resized_raw_frame, cv2.COLOR_BGR2RGB)
-        img_raw = Image.fromarray(img_raw)
-        imgtk_raw = ImageTk.PhotoImage(image=img_raw)
-        self.raw_video_label.imgtk = imgtk_raw
-        self.raw_video_label.configure(image=imgtk_raw)
-
         if self.is_processing:
-            # --- Start Processing Logic ---
-            processed_frame_display = frame.copy() # Start with a fresh copy of the original frame for processing
-
-            hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            current_lower_hsv = self.lower_hsv
-            current_upper_hsv = self.upper_hsv
-            mask = cv2.inRange(hsv_frame, current_lower_hsv, current_upper_hsv)
-
-            self.current_bbox_for_warp = None # Reset for current frame
-
-            if self.tracker_initialized:
-                success, bbox = self.tracker.update(frame)
-                if success:
-                    self.last_known_bbox = bbox
-                    self.current_bbox_for_warp = bbox
-                    logger.debug(f"Tracker updated successfully. New bbox: {bbox}")
-                else:
-                    logger.info("Tracker lost object. Attempting re-detection.")
-                    self.tracker_initialized = False
-                    self.tracker = None
-
-            if not self.tracker_initialized:
-                # Optional: Morphological operations
-                # kernel = np.ones((5,5), np.uint8)
-                # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-                # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-                contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-                if contours:
-                    largest_contour = max(contours, key=cv2.contourArea)
-                    min_contour_area = 500 # TODO: Make configurable
-                    if cv2.contourArea(largest_contour) > min_contour_area:
-                        x, y, w, h = cv2.boundingRect(largest_contour)
-                        self.current_bbox_for_warp = (x,y,w,h)
-                        self.last_known_bbox = (x,y,w,h)
-
-                        # Initialize tracker only if available
-                        if self.trackers_available:
-                            try:
-                                if not self.tracker_availability_checked: # Check only once
-                                    # Attempt to create a tracker to see if the module is fully available
-                                    # This is a bit of a canary test.
-                                    logger.debug("Performing canary test for cv2.TrackerCSRT_create()")
-                                    test_tracker = cv2.TrackerCSRT_create()
-                                    del test_tracker
-                                    logger.debug("cv2.TrackerCSRT_create() canary test successful.")
-                                    self.tracker_availability_checked = True # Mark as checked
-
-                                # self.tracker = cv2.TrackerKCF_create()
-                                self.tracker = cv2.TrackerCSRT_create()
-                                self.tracker.init(frame, self.last_known_bbox)
-                                self.tracker_initialized = True
-                                logger.info(f"Tracker initialized with bbox: {self.last_known_bbox}")
-                            except AttributeError:
-                                if not self.tracker_availability_checked: # Show warning and log error only once
-                                    messagebox.showwarning("Tracker Error",
-                                                           "OpenCV trackers (e.g., CSRT) seem unavailable in this OpenCV build.\n"
-                                                           "Please install 'opencv-contrib-python' for tracking features:\n"
-                                                           "pip uninstall opencv-python\n"
-                                                           "pip install opencv-contrib-python\n\n"
-                                                           "Falling back to contour-only detection.")
-                                    logger.error("cv2.TrackerCSRT_create() not found. Install opencv-contrib-python. Tracking disabled.", exc_info=args.debug)
-                                    self.trackers_available = False
-                                self.tracker_availability_checked = True # Mark as checked after first attempt
-                                self.tracker = None
-                                self.tracker_initialized = False
-                            except Exception as e:
-                                logger.error(f"Error initializing tracker: {e}", exc_info=args.debug)
-                                self.tracker = None
-                                self.tracker_initialized = False
-                        else:
-                            if not self.tracker_availability_checked: # Log once that trackers are disabled
-                                logger.info("Trackers are marked as unavailable. Using contour-only detection.")
-                                self.tracker_availability_checked = True # Prevent this message from repeating
-
-                        # If we are in contour detection mode (either tracker unavailable or lost)
-                        # and a contour was found, draw the green box.
-                        # This current_bbox_for_warp was set from contour.
-                        if (not self.tracker_initialized or not self.trackers_available) and self.current_bbox_for_warp:
-                             cx, cy, cw, ch = [int(v) for v in self.current_bbox_for_warp]
-                             cv2.rectangle(processed_frame_display, (cx, cy), (cx + cw, cy + ch), (0, 255, 0), 2) # Green for contour
-
-            # If tracker was initialized and successfully updated, current_bbox_for_warp is from tracker. Draw blue.
-            elif self.tracker_initialized and self.current_bbox_for_warp and used_tracker_for_bbox:
-                xt, yt, wt, ht = [int(v) for v in self.current_bbox_for_warp]
-                cv2.rectangle(processed_frame_display, (xt, yt), (xt + wt, yt + ht), (255, 0, 0), 2) # Blue for tracker box
-
-            # If after all attempts, no bbox, ensure processed_frame_display is just the raw frame.
-            if self.current_bbox_for_warp is None:
-                processed_frame_display = frame.copy() # Ensure it's clean if no bbox
-                logger.debug("No valid bbox for warp, processed display will be raw frame.")
-
+            results = self.model(frame, stream=True)
+            for result in results:
+                frame = result.plot()
+                if result.keypoints:
+                    keypoints = result.keypoints[0]
+                    keypoint_idx = self.keypoint_names.index(self.keypoint_var.get())
+                    if keypoint_idx < len(keypoints.xy[0]):
+                        x, y = keypoints.xy[0][keypoint_idx]
+                        w, h = 100, 100  # Placeholder for overlay size
+                        self.current_bbox_for_warp = (x - w / 2, y - h / 2, w, h)
 
             if self.current_bbox_for_warp:
-                # The x,y,w,h for warp should come from self.current_bbox_for_warp
                 x_warp, y_warp, w_warp, h_warp = [int(v) for v in self.current_bbox_for_warp]
-
-                # Define target points as corners of the bounding box for warp
-                # This is a simplification.
                 temp_quad_points = np.array([
                     [x_warp, y_warp],
                     [x_warp + w_warp, y_warp],
                     [x_warp + w_warp, y_warp + h_warp],
                     [x_warp, y_warp + h_warp]
                 ], dtype=np.float32)
-
-                # Order points: top-left, top-right, bottom-right, bottom-left
                 rect = np.zeros((4, 2), dtype="float32")
                 s = temp_quad_points.sum(axis=1)
                 rect[0] = temp_quad_points[np.argmin(s)]
@@ -764,8 +550,6 @@ class App:
                 rect[1] = temp_quad_points[np.argmin(diff)]
                 rect[3] = temp_quad_points[np.argmax(diff)]
                 ordered_target_points = rect
-
-                # Text Overlay (Warped)
                 text_to_overlay = self.text_entry_var.get()
                 if not text_to_overlay.strip(): text_to_overlay = " "
                 font_face = cv2.FONT_HERSHEY_SIMPLEX
@@ -783,46 +567,26 @@ class App:
                 cv2.putText(text_texture, text_to_overlay, (text_origin_x, text_origin_y), font_face, font_scale, font_color_bgr, thickness, cv2.LINE_AA)
                 source_points = np.array([[0, 0], [src_w - 1, 0], [src_w - 1, src_h - 1], [0, src_h - 1]], dtype=np.float32)
 
-                if ordered_target_points.shape == (4,2) and source_points.shape == (4,2): # Check if points are valid
+                if ordered_target_points.shape == (4,2) and source_points.shape == (4,2):
                     matrix = cv2.getPerspectiveTransform(source_points, ordered_target_points)
-                    warped_text_texture = cv2.warpPerspective(text_texture, matrix, (processed_frame_display.shape[1], processed_frame_display.shape[0]))
+                    warped_text_texture = cv2.warpPerspective(text_texture, matrix, (frame.shape[1], frame.shape[0]))
                     mask_for_blending = cv2.inRange(warped_text_texture, np.array([0,0,0]), np.array([250,250,250]))
                     mask_for_blending = cv2.bitwise_not(mask_for_blending)
-                    processed_frame_display = cv2.bitwise_and(processed_frame_display, processed_frame_display, mask=cv2.bitwise_not(mask_for_blending))
-                    processed_frame_display = cv2.bitwise_or(processed_frame_display, warped_text_texture, mask=mask_for_blending)
+                    frame = cv2.bitwise_and(frame, frame, mask=cv2.bitwise_not(mask_for_blending))
+                    frame = cv2.bitwise_or(frame, warped_text_texture, mask=mask_for_blending)
                 else:
                     logger.warning("Invalid points for perspective transform. Skipping warp.")
-            # --- End Processing Logic ---
 
-            # Display processed frame
-            target_processed_w = self.processed_video_label_width - 10 if self.processed_video_label_width > 20 else self.processed_video_label_width
-            target_processed_h = self.processed_video_label_height - 10 if self.processed_video_label_height > 20 else self.processed_video_label_height
+        target_w = self.video_label_width - 10 if self.video_label_width > 20 else self.video_label_width
+        target_h = self.video_label_height - 10 if self.video_label_height > 20 else self.video_label_height
+        resized_frame = self._resize_frame_keep_aspect_ratio(frame, target_w, target_h)
+        img_rgb = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+        img_pil = Image.fromarray(img_rgb)
+        imgtk = ImageTk.PhotoImage(image=img_pil)
+        self.video_label.imgtk = imgtk
+        self.video_label.configure(image=imgtk)
 
-            display_image_on_processed_label = None
-            if self.show_mask_preview.get():
-                # If show mask is checked, display the mask
-                if 'mask' in locals() and mask is not None: # Ensure mask exists
-                    resized_mask = self._resize_frame_keep_aspect_ratio(mask, target_processed_w, target_processed_h)
-                    display_image_on_processed_label = cv2.cvtColor(resized_mask, cv2.COLOR_GRAY2RGB)
-                else: # Fallback if mask isn't generated for some reason
-                    display_image_on_processed_label = np.zeros((target_processed_h, target_processed_w, 3), dtype=np.uint8) # Black image
-            else:
-                # Otherwise, display the processed_frame_display (with overlays)
-                resized_processed_frame = self._resize_frame_keep_aspect_ratio(processed_frame_display, target_processed_w, target_processed_h)
-                display_image_on_processed_label = cv2.cvtColor(resized_processed_frame, cv2.COLOR_BGR2RGB)
-
-            img_processed_pil = Image.fromarray(display_image_on_processed_label)
-            imgtk_processed = ImageTk.PhotoImage(image=img_processed_pil)
-            self.processed_video_label.imgtk = imgtk_processed
-            self.processed_video_label.configure(image=imgtk_processed)
-        else:
-            # If not processing, show default image on processed_video_label
-            self.processed_video_label.configure(image=self.default_video_img)
-            self.processed_video_label.image = self.default_video_img
-
-
-        # Schedule next frame update
-        if self.camera_active: # Check if we should continue the loop
+        if self.camera_active:
             self.after_id_video_loop = self.root.after(15, self._update_video_feeds_loop)
 
     def on_closing(self):
