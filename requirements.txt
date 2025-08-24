@@ -4,5 +4,5 @@ ultralytics==8.0.150
 torch
 torchvision
 opencv-python
+PyQt5
 # Add pyvirtualcam later when we get to that step
-# Add GUI framework (e.g., PyQt5 or Tkinter) later
