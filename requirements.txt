@@ -5,4 +5,4 @@ torch
 torchvision
 opencv-python
 PyQt5
-# Add pyvirtualcam later when we get to that step
+pyvirtualcam
